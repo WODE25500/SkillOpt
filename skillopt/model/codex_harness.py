@@ -120,7 +120,16 @@ def prepare_workspace(
             parent = os.path.dirname(dst)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            os.symlink(os.path.abspath(src), dst)
+            src_abs = os.path.abspath(src)
+            try:
+                os.symlink(src_abs, dst, target_is_directory=os.path.isdir(src_abs))
+            except OSError:
+                # Windows symlinks need SeCreateSymbolicLinkPrivilege (Developer
+                # Mode/elevation); copying is fine inside a private work dir.
+                if os.path.isdir(src_abs):
+                    shutil.copytree(src_abs, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src_abs, dst)
 
     attachment_lines: list[str] = []
     if images:
@@ -1771,14 +1780,15 @@ def run_copilot_exec(
 
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
-        safe_raw = stdout
+        safe_raw = _redact_cursor_error(stdout)
         if stderr:
-            safe_raw = f"{safe_raw}\n[stderr]\n{stderr}" if safe_raw else f"[stderr]\n{stderr}"
+            safe_stderr = _redact_cursor_error(stderr)
+            safe_raw = f"{safe_raw}\n[stderr]\n{safe_stderr}" if safe_raw else f"[stderr]\n{safe_stderr}"
         all_raw.append(f"===== COPILOT CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
         combined = "\n\n".join(all_raw)
 
         if proc.returncode != 0:
-            detail = (stderr or stdout).strip()[:4000]
+            detail = _redact_cursor_error((stderr or stdout).strip())[:4000]
             raise RuntimeError(
                 f"Copilot CLI failed with exit code {proc.returncode}: {detail}"
             )

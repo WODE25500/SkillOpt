@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import warnings
 from collections.abc import Mapping
 from typing import Any
@@ -34,10 +35,23 @@ def _coerce_bool_setting(value: Any, *, name: str) -> bool:
     )
 
 
+def _resolve_cli_path(value: str) -> str:
+    """Resolve a CLI name/executable via PATH + PATHEXT.
+
+    On Windows these npm CLIs install as ``.cmd`` shims, and CreateProcess does
+    not search PATHEXT for a bare name (so a bare ``codex`` spawn raises
+    WinError 2). ``shutil.which`` finds the real executable; fall back to the
+    given value so a configured path still passes through unchanged when it
+    cannot be resolved (e.g. a name that is not on this PATH).
+    """
+    resolved = shutil.which(value)
+    return resolved or value
+
+
 OPTIMIZER_BACKEND = normalize_backend_name(os.environ.get("OPTIMIZER_BACKEND", "openai_chat"))
 TARGET_BACKEND = normalize_backend_name(os.environ.get("TARGET_BACKEND", "openai_chat"))
 
-CODEX_EXEC_PATH = os.environ.get("CODEX_EXEC_PATH") or os.environ.get("CODEX_CLI_BIN") or os.environ.get("CODEX_PATH") or "codex"
+CODEX_EXEC_PATH = _resolve_cli_path(os.environ.get("CODEX_EXEC_PATH") or os.environ.get("CODEX_CLI_BIN") or os.environ.get("CODEX_PATH") or "codex")
 CODEX_EXEC_SANDBOX = os.environ.get("CODEX_EXEC_SANDBOX") or os.environ.get("CODEX_SANDBOX_MODE") or os.environ.get("CODEX_SANDBOX") or "workspace-write"
 CODEX_EXEC_PROFILE = os.environ.get("CODEX_EXEC_PROFILE", "")
 _CODEX_EXEC_FULL_AUTO_ENV = os.environ.get("CODEX_EXEC_FULL_AUTO")
@@ -49,13 +63,13 @@ CODEX_EXEC_USE_SDK = os.environ.get("CODEX_EXEC_USE_SDK", "auto")
 CODEX_EXEC_NETWORK_ACCESS = _parse_bool(os.environ.get("CODEX_EXEC_NETWORK_ACCESS"), False)
 CODEX_EXEC_WEB_SEARCH = _parse_bool(os.environ.get("CODEX_EXEC_WEB_SEARCH"), False)
 CODEX_EXEC_APPROVAL_POLICY = os.environ.get("CODEX_EXEC_APPROVAL_POLICY", "never")
-CLAUDE_CODE_EXEC_PATH = os.environ.get("CLAUDE_CODE_EXEC_PATH", "claude")
+CLAUDE_CODE_EXEC_PATH = _resolve_cli_path(os.environ.get("CLAUDE_CODE_EXEC_PATH", "claude"))
 CLAUDE_CODE_EXEC_PROFILE = os.environ.get("CLAUDE_CODE_EXEC_PROFILE", "")
 CLAUDE_CODE_EXEC_USE_SDK = os.environ.get("CLAUDE_CODE_EXEC_USE_SDK", "auto")
 CLAUDE_CODE_EXEC_EFFORT = os.environ.get("CLAUDE_CODE_EXEC_EFFORT", "medium")
-CURSOR_EXEC_PATH = os.environ.get("CURSOR_EXEC_PATH", "cursor-agent")
+CURSOR_EXEC_PATH = _resolve_cli_path(os.environ.get("CURSOR_EXEC_PATH", "cursor-agent"))
 CURSOR_EXEC_SANDBOX = os.environ.get("CURSOR_EXEC_SANDBOX", "enabled")
-COPILOT_EXEC_PATH = os.environ.get("COPILOT_EXEC_PATH", "copilot")
+COPILOT_EXEC_PATH = _resolve_cli_path(os.environ.get("COPILOT_EXEC_PATH", "copilot"))
 COPILOT_EXEC_HOME = os.environ.get("COPILOT_EXEC_HOME", "")
 COPILOT_EXEC_ALLOW_ALL_TOOLS = (
     "1" if _parse_bool(os.environ.get("COPILOT_EXEC_ALLOW_ALL_TOOLS"), False) else "0"
@@ -222,7 +236,7 @@ def configure_codex_exec(
         else _coerce_bool_setting(web_search, name="codex_exec_web_search")
     )
     if path is not None:
-        CODEX_EXEC_PATH = str(path).strip() or "codex"
+        CODEX_EXEC_PATH = _resolve_cli_path(str(path).strip() or "codex")
         os.environ["CODEX_EXEC_PATH"] = CODEX_EXEC_PATH
         os.environ["CODEX_CLI_BIN"] = CODEX_EXEC_PATH
     if sandbox is not None:
@@ -361,7 +375,7 @@ def configure_claude_code_exec(
 ) -> None:
     global CLAUDE_CODE_EXEC_PATH, CLAUDE_CODE_EXEC_PROFILE, CLAUDE_CODE_EXEC_USE_SDK, CLAUDE_CODE_EXEC_EFFORT, CLAUDE_CODE_EXEC_MAX_THINKING_TOKENS
     if path is not None:
-        CLAUDE_CODE_EXEC_PATH = str(path).strip() or "claude"
+        CLAUDE_CODE_EXEC_PATH = _resolve_cli_path(str(path).strip() or "claude")
         os.environ["CLAUDE_CODE_EXEC_PATH"] = CLAUDE_CODE_EXEC_PATH
     if profile is not None:
         CLAUDE_CODE_EXEC_PROFILE = str(profile).strip()
@@ -398,7 +412,7 @@ def configure_cursor_exec(
 ) -> None:
     global CURSOR_EXEC_PATH, CURSOR_EXEC_SANDBOX
     if path is not None:
-        CURSOR_EXEC_PATH = str(path).strip() or "cursor-agent"
+        CURSOR_EXEC_PATH = _resolve_cli_path(str(path).strip() or "cursor-agent")
         os.environ["CURSOR_EXEC_PATH"] = CURSOR_EXEC_PATH
     if sandbox is not None:
         normalized_sandbox = str(sandbox).strip().lower() or "enabled"
@@ -433,7 +447,7 @@ def configure_copilot_exec(
     """
     global COPILOT_EXEC_PATH, COPILOT_EXEC_HOME, COPILOT_EXEC_ALLOW_ALL_TOOLS
     if path is not None:
-        COPILOT_EXEC_PATH = str(path).strip() or "copilot"
+        COPILOT_EXEC_PATH = _resolve_cli_path(str(path).strip() or "copilot")
         os.environ["COPILOT_EXEC_PATH"] = COPILOT_EXEC_PATH
     if home is not None:
         COPILOT_EXEC_HOME = str(home).strip()
@@ -478,7 +492,7 @@ def configure_copilot_chat(
     global COPILOT_EXEC_PATH, COPILOT_EXEC_HOME
     global COPILOT_CHAT_OPTIMIZER_MODEL, COPILOT_CHAT_TARGET_MODEL, COPILOT_CHAT_TIMEOUT
     if path is not None:
-        COPILOT_EXEC_PATH = str(path).strip() or "copilot"
+        COPILOT_EXEC_PATH = _resolve_cli_path(str(path).strip() or "copilot")
         os.environ["COPILOT_EXEC_PATH"] = COPILOT_EXEC_PATH
     if home is not None:
         COPILOT_EXEC_HOME = str(home).strip()
