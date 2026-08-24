@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -73,6 +74,25 @@ def render_skill_md(
     return "\n".join(chunks)
 
 
+def _is_symlink_privilege_error(exc: OSError) -> bool:
+    """Return True only for the Windows 'symlink privilege not held' case.
+
+    We must not mask a real collision/error by silently falling back to a copy;
+    only the case where the OS refuses to create a symlink because the caller
+    lacks SeCreateSymbolicLinkPrivilege (Windows Developer Mode / elevation)
+    should fall back to a copy inside a private work dir.
+    """
+    if getattr(exc, "winerror", None) in (1314,):  # ERROR_PRIVILEGE_NOT_HELD
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {
+            getattr(errno, "EPERM", -1),
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+        }
+    return False
+
+
 def prepare_workspace(
     *,
     work_dir: str,
@@ -121,13 +141,19 @@ def prepare_workspace(
             if parent:
                 os.makedirs(parent, exist_ok=True)
             src_abs = os.path.abspath(src)
+            if os.path.lexists(dst):
+                raise FileExistsError(
+                    f"link destination already exists: {dst} (from {src})"
+                )
             try:
                 os.symlink(src_abs, dst, target_is_directory=os.path.isdir(src_abs))
-            except OSError:
-                # Windows symlinks need SeCreateSymbolicLinkPrivilege (Developer
-                # Mode/elevation); copying is fine inside a private work dir.
+            except OSError as exc:
+                # Fail closed: only fall back for the Windows symlink-privilege
+                # case, and never merge into an existing destination.
+                if not _is_symlink_privilege_error(exc):
+                    raise
                 if os.path.isdir(src_abs):
-                    shutil.copytree(src_abs, dst, dirs_exist_ok=True)
+                    shutil.copytree(src_abs, dst)
                 else:
                     shutil.copy2(src_abs, dst)
 
@@ -1514,6 +1540,56 @@ def _sanitize_cursor_json(value: Any, *, field: str = "") -> Any:
     return value
 
 
+def _redact_copilot_json(value: Any, *, field: str = "") -> Any:
+    """Mapping-key-aware redaction for Copilot JSONL.
+
+    Unlike the cursor trace sanitizer, this does NOT omit ``content``/``prompt``
+    (those are the CLI output we want to keep debuggable); it redacts by secret
+    field name and applies the string-level redactor to remaining string leaves.
+    """
+    normalized_field = re.sub(r"[^a-z0-9]", "", field.lower())
+    if (
+        normalized_field in _CURSOR_SECRET_TRACE_FIELDS
+        or normalized_field.endswith("apikey")
+    ):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_copilot_json(item, field=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_copilot_json(item) for item in value]
+    if isinstance(value, str):
+        return _redact_cursor_error(value)
+    return value
+
+
+def _redact_copilot_trace(raw: str | bytes) -> str:
+    """Structurally sanitize Copilot JSONL output (mapping-key aware).
+
+    ``_redact_cursor_error`` catches unquoted ``key=value`` forms, but the
+    Copilot JSONL stream carries ``"token": "..."`` objects. Parse each line
+    and walk it with the field-name-aware sanitizer; non-JSON lines still fall
+    through the string-level redactor.
+    """
+    text = _cursor_process_text(raw)
+    lines_out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines_out.append(line)
+            continue
+        try:
+            obj = json.loads(stripped)
+        except (ValueError, TypeError):
+            lines_out.append(_redact_cursor_error(line))
+            continue
+        obj = _redact_copilot_json(obj)
+        lines_out.append(json.dumps(obj, ensure_ascii=False))
+    return "\n".join(lines_out)
+
+
 def _cursor_process_text(value: str | bytes) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
@@ -1780,15 +1856,15 @@ def run_copilot_exec(
 
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
-        safe_raw = _redact_cursor_error(stdout)
+        safe_raw = _redact_copilot_trace(stdout)
         if stderr:
-            safe_stderr = _redact_cursor_error(stderr)
+            safe_stderr = _redact_copilot_trace(stderr)
             safe_raw = f"{safe_raw}\n[stderr]\n{safe_stderr}" if safe_raw else f"[stderr]\n{safe_stderr}"
         all_raw.append(f"===== COPILOT CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
         combined = "\n\n".join(all_raw)
 
         if proc.returncode != 0:
-            detail = _redact_cursor_error((stderr or stdout).strip())[:4000]
+            detail = _redact_copilot_trace((stderr or stdout).strip())[:4000]
             raise RuntimeError(
                 f"Copilot CLI failed with exit code {proc.returncode}: {detail}"
             )
