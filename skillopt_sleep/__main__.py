@@ -44,6 +44,7 @@ from skillopt_sleep.staging import (
     json_safe,
     latest_staging,
     pending_staged_skills,
+    redact_secrets,
     staged_skills,
 )
 from skillopt_sleep.staging import adopt as adopt_staging
@@ -483,7 +484,7 @@ def _handoff_mine_and_pin(cfg, args, backend, snapshot: str, dry: bool):
     # NOT marked reviewed: feeding this snapshot back through --tasks-file
     # with a real backend must still hit the human-review gate above. The
     # driver itself loads it directly, with the same trust as in-cycle mining.
-    write_tasks_file(snapshot, _redact_deep(payload))
+    write_tasks_file(snapshot, redact_secrets(payload))
     print(
         f"[sleep] handoff: pinned {len(tasks)} tasks -> {snapshot}",
         file=sys.stderr if args.json else sys.stdout,
@@ -807,7 +808,7 @@ def cmd_harvest(args) -> int:
     )
     output_path = ""
     if getattr(args, "output", ""):
-        output_path = write_tasks_file(args.output, _redact_deep(payload))
+        output_path = write_tasks_file(args.output, redact_secrets(payload))
     if args.json:
         json_payload = _redact_deep(payload)
         if output_path:
