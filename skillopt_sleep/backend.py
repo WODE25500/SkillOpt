@@ -565,8 +565,29 @@ class CliBackend(Backend):
                 ))
         return edits
 
+    def _cache_get(self, key: str) -> str | None:
+        """Thread-safe cache read (route subclass cache access through this)."""
+        with self._lock:
+            return self._cache.get(key)
+
+    def _cache_pop(self, key: str) -> str | None:
+        """Thread-safe cache pop — used to drop a failed entry without racing."""
+        with self._lock:
+            return self._cache.pop(key, None)
+
+    def _cache_pop_if(self, key: str, expected: str | None) -> None:
+        """Drop a cache entry only if it still holds ``expected``.
+
+        A failed caller must not delete a successful result another worker just
+        stored for the same key, so we only pop our own (empty) value.
+        """
+        with self._lock:
+            if self._cache.get(key) == expected:
+                self._cache.pop(key, None)
+
     def tokens_used(self) -> int:
-        return self._tokens
+        with self._lock:
+            return self._tokens
 
 
 # ── Pi CLI backend ────────────────────────────────────────────────
@@ -615,13 +636,13 @@ class PiCliBackend(CliBackend):
 
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         """Do not make a transient Pi failure sticky in the response cache."""
-        if key in self._cache:
+        if self._cache_get(key) is not None:
             # A cached success must not expose an unrelated previous failure
             # through diagnostics/evidence attached to this call.
             self.last_call_error = ""
         out = super()._cached_call(key, prompt, max_tokens=max_tokens)
         if not out:
-            self._cache.pop(key, None)
+            self._cache_pop_if(key, out)
         return out
 
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -1250,11 +1271,11 @@ class OpenCodeCliBackend(CliBackend):
 
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         """Keep failed OpenCode calls out of the cache."""
-        if key in self._cache:
+        if self._cache_get(key) is not None:
             self.last_call_error = ""
         out = super()._cached_call(key, prompt, max_tokens=max_tokens)
         if not out:
-            self._cache.pop(key, None)
+            self._cache_pop_if(key, out)
         return out
 
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:

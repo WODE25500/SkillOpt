@@ -65,3 +65,47 @@ def test_cached_call_concurrent_access_does_not_corrupt():
     # a valid cached value and the cache/token state stays consistent.
     assert all(r == "resp:hello" for r in results)
     assert b._cache["k:1"] == "resp:hello"
+
+
+def test_concurrent_misses_with_barrier_are_consistent():
+    """Force overlapping cache misses with a barrier; state stays consistent."""
+    n = 6
+    barrier = threading.Barrier(n)
+
+    class _BarrierBackend(_EchoBackend):
+        def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+            barrier.wait(timeout=5)
+            return super()._call(prompt, max_tokens=max_tokens)
+
+    b = _BarrierBackend()
+    results: list[str] = []
+    errors: list[Exception] = []
+
+    def worker():
+        try:
+            results.append(b._cached_call("k:1", "hello"))
+        except Exception as exc:  # pragma: no cover - safety net
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert all(r == "resp:hello" for r in results)
+    assert b._cache["k:1"] == "resp:hello"
+
+
+def test_cache_pop_if_only_removes_own_value():
+    """A failed caller must not delete another worker's successful result."""
+    b = _EchoBackend()
+    b._cache["k:1"] = "resp:hello"
+    # Failed caller (pop-if with its empty value) must NOT remove a success.
+    b._cache_pop_if("k:1", "")
+    assert b._cache["k:1"] == "resp:hello"
+    # But it does remove an entry that still holds the expected (empty) value.
+    b._cache["k:2"] = ""
+    b._cache_pop_if("k:2", "")
+    assert "k:2" not in b._cache
