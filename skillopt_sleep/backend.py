@@ -362,8 +362,20 @@ class CliBackend(Backend):
         out = self._call(prompt, max_tokens=max_tokens)
         delta = len(prompt) // 4 + len(out) // 4
         with self._lock:
-            self._tokens += delta
-            self._cache[key] = out
+            existing = self._cache.get(key)
+            if existing:
+                # A success was cached by another worker; prefer it (dedup) so
+                # an empty/duplicate never overwrites a concurrent success.
+                out = existing
+                delta = 0
+            elif out:
+                # This worker succeeded and nothing is cached: cache it.
+                self._tokens += delta
+                self._cache[key] = out
+            else:
+                # Empty result + nothing cached: transient failure — don't cache
+                # it (so it isn't sticky), but count the call's tokens.
+                self._tokens += delta
         # Call-local accounting: record this call's delta on the calling thread
         # so parallel replay_one() reads its own cost, not a before/after total
         # that another worker inflates.

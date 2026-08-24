@@ -136,3 +136,35 @@ def test_token_delta_isolated_between_threads():
     # Each worker that actually made a call saw its own positive delta.
     for i in range(4):
         assert deltas[i] > 0, f"worker {i} got no call-local delta"
+
+
+def test_concurrent_pi_empty_and_success_preserve_success(monkeypatch):
+    """A failed (empty) Pi worker must not clobber another worker's success."""
+    from skillopt_sleep.backend import PiCliBackend
+
+    b = PiCliBackend(model="x")
+    n = 2
+    barrier = threading.Barrier(n)
+    state: dict[str, str] = {}
+
+    def fake_call(prompt: str, *, max_tokens: int = 1024) -> str:
+        barrier.wait(timeout=5)
+        return state[threading.current_thread().name]
+
+    monkeypatch.setattr(b, "_call", fake_call)
+    results: list[str] = []
+
+    def worker(ret: str):
+        state[threading.current_thread().name] = ret
+        results.append(b._cached_call("k:1", "p"))
+
+    th_empty = threading.Thread(target=worker, args=("",))
+    th_success = threading.Thread(target=worker, args=("resp:ok",))
+    th_empty.start()
+    th_success.start()
+    th_empty.join()
+    th_success.join()
+
+    # The successful result is cached; the empty worker never removes it.
+    assert b._cache["k:1"] == "resp:ok"
+    assert "resp:ok" in results
