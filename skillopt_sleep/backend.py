@@ -337,6 +337,8 @@ class CliBackend(Backend):
         # parallel replay path (SKILLOPT_SLEEP_WORKERS>1). The model call
         # itself stays outside the lock so parallel workers can overlap.
         self._lock = threading.Lock()
+        # Per-thread token delta for call-local accounting under parallel replay.
+        self._thread_local = threading.local()
 
     # subclasses override --------------------------------------------------
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -358,9 +360,14 @@ class CliBackend(Backend):
         # over the same backend overlap; a concurrent miss may duplicate a call,
         # but _cache/_tokens reads+writes below are atomic.
         out = self._call(prompt, max_tokens=max_tokens)
+        delta = len(prompt) // 4 + len(out) // 4
         with self._lock:
-            self._tokens += len(prompt) // 4 + len(out) // 4
+            self._tokens += delta
             self._cache[key] = out
+        # Call-local accounting: record this call's delta on the calling thread
+        # so parallel replay_one() reads its own cost, not a before/after total
+        # that another worker inflates.
+        self._thread_local.delta = delta
         if ev is not None:
             ev.log("replay", "model_call", kind=kind, cache_hit=False, key=key,
                    phase=getattr(self, "evidence_phase", ""), backend=self.name,
@@ -588,6 +595,10 @@ class CliBackend(Backend):
     def tokens_used(self) -> int:
         with self._lock:
             return self._tokens
+
+    def token_delta(self) -> int:
+        """Token cost of the most recent call on THIS thread (call-local)."""
+        return getattr(self._thread_local, "delta", 0)
 
 
 # ── Pi CLI backend ────────────────────────────────────────────────

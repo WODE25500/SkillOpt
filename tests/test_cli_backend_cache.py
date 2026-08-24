@@ -109,3 +109,30 @@ def test_cache_pop_if_only_removes_own_value():
     b._cache["k:2"] = ""
     b._cache_pop_if("k:2", "")
     assert "k:2" not in b._cache
+
+
+def test_token_delta_is_call_local():
+    """A single call records a positive per-call token delta on this thread."""
+    b = _EchoBackend()
+    b._cached_call("k:1", "hello")
+    assert b.token_delta() > 0
+
+
+def test_token_delta_isolated_between_threads():
+    """Per-thread token deltas do not leak across parallel workers."""
+    b = _EchoBackend()
+    deltas: dict[int, int] = {}
+
+    def worker(i: int):
+        b._cached_call(f"k:{i}", "hello")
+        deltas[i] = b.token_delta()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Each worker that actually made a call saw its own positive delta.
+    for i in range(4):
+        assert deltas[i] > 0, f"worker {i} got no call-local delta"
