@@ -6,11 +6,11 @@
 #   With args: run only on listed categories (research-cron, devops, wiki)
 #
 # Cron (3am MYT daily):
-#   0 3 * * * cd /home/ethanclaw/.openclaw/workspace/skills/skillopt-sleep && bash run_sleep_cron.sh >> ~/.skillopt-sleep/nightly.log 2>&1
+#   0 3 * * * cd "$HOME/.openclaw/workspace/skills/skillopt-sleep" && bash run_sleep_cron.sh >> ~/.skillopt-sleep/nightly.log 2>&1
 
 set -euo pipefail
 
-SKILL_DIR="/home/ethanclaw/.openclaw/workspace/skills/skillopt-sleep"
+SKILL_DIR="$HOME/.openclaw/workspace/skills/skillopt-sleep"
 TESTS_DIR="$SKILL_DIR/tests"
 LOG_DIR="$HOME/.skillopt-sleep/logs"
 mkdir -p "$LOG_DIR"

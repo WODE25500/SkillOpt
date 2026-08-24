@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Ensure the skillopt_sleep package is importable (it lives in the cloned repo)
-REPO = Path("/home/ethanclaw/.openclaw/workspace/SkillOpt")
+REPO = Path(os.environ.get("SKILLOPT_REPO", os.path.expanduser("~/.openclaw/workspace/SkillOpt")))
 sys.path.insert(0, str(REPO))
 
 # Register our backend before importing cycle
@@ -72,7 +72,7 @@ from skillopt_sleep.config import load_config
 def main() -> int:
     ap = argparse.ArgumentParser(description="OpenClaw SkillOpt-Sleep nightly cycle")
     ap.add_argument("--dry-run", action="store_true", help="Compute but don't stage")
-    ap.add_argument("--config", default="/home/ethanclaw/.openclaw/workspace/skills/skillopt-sleep/config.json")
+    ap.add_argument("--config", default=os.path.expanduser("~/.openclaw/workspace/skills/skillopt-sleep/config.json"))
     ap.add_argument("--tasks", default=None, help="Path to pre-built tasks JSON")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()

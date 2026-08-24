@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-SKILL_DIR = Path("/home/ethanclaw/.openclaw/workspace/skills/skillopt-sleep")
+SKILL_DIR = Path(os.path.expanduser("~/.openclaw/workspace/skills/skillopt-sleep"))
 STATE_DIR = Path(os.path.expanduser("~/.skillopt-sleep"))  # default
 STAGING_ROOT = STATE_DIR
 
@@ -32,14 +32,14 @@ def _resolve_state_dir():
 
     Priority: scan in order:
       1. ~/.skillopt-sleep/                 (default)
-      2. /home/ethanclaw/.openclaw/workspace/.skillopt-sleep/  (when staging is there)
-      3. /home/ethanclaw/.openclaw/.skillopt-sleep/            (parent of overridden claude_home)
+      2. ~/.openclaw/workspace/.skillopt-sleep/  (when staging is there)
+      3. ~/.openclaw/.skillopt-sleep/            (parent of overridden claude_home)
     Pick the first one that has a state.json OR staging dir.
     """
     candidates = [
         Path(os.path.expanduser("~/.skillopt-sleep")),
-        Path("/home/ethanclaw/.openclaw/workspace/.skillopt-sleep"),
-        Path("/home/ethanclaw/.openclaw/.skillopt-sleep"),
+        Path(os.path.expanduser("~/.openclaw/workspace/.skillopt-sleep")),
+        Path(os.path.expanduser("~/.openclaw/.skillopt-sleep")),
     ]
     # Prefer the one with state.json
     for c in candidates:
