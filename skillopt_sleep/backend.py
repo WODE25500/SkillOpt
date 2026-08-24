@@ -27,6 +27,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -332,6 +333,10 @@ class CliBackend(Backend):
         self._cache: Dict[str, str] = {}
         self.last_call_error = ""
         self.last_reflect_raw = ""
+        # Guards _cache/_tokens against concurrent mutation on the opt-in
+        # parallel replay path (SKILLOPT_SLEEP_WORKERS>1). The model call
+        # itself stays outside the lock so parallel workers can overlap.
+        self._lock = threading.Lock()
 
     # subclasses override --------------------------------------------------
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -340,16 +345,22 @@ class CliBackend(Backend):
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         kind = key.split(":", 1)[0]
         ev = getattr(self, "evidence", None)
-        if key in self._cache:
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is not None:
             # cache hits log key-only (the full text is on the original miss event)
             if ev is not None:
                 ev.log("replay", "model_call", kind=kind, cache_hit=True, key=key,
                        phase=getattr(self, "evidence_phase", ""), backend=self.name,
                        model=self.model)
-            return self._cache[key]
+            return cached
+        # The model call is intentionally outside the lock so parallel workers
+        # over the same backend overlap; a concurrent miss may duplicate a call,
+        # but _cache/_tokens reads+writes below are atomic.
         out = self._call(prompt, max_tokens=max_tokens)
-        self._tokens += len(prompt) // 4 + len(out) // 4
-        self._cache[key] = out
+        with self._lock:
+            self._tokens += len(prompt) // 4 + len(out) // 4
+            self._cache[key] = out
         if ev is not None:
             ev.log("replay", "model_call", kind=kind, cache_hit=False, key=key,
                    phase=getattr(self, "evidence_phase", ""), backend=self.name,

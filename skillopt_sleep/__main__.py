@@ -807,9 +807,9 @@ def cmd_harvest(args) -> int:
     )
     output_path = ""
     if getattr(args, "output", ""):
-        output_path = write_tasks_file(args.output, payload)
+        output_path = write_tasks_file(args.output, _redact_deep(payload))
     if args.json:
-        json_payload = dict(payload)
+        json_payload = _redact_deep(payload)
         if output_path:
             json_payload["output"] = output_path
         print(json.dumps(json_payload, ensure_ascii=False, indent=2))
