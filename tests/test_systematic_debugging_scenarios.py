@@ -27,7 +27,7 @@ def test_get_scenarios_returns_three():
     scenarios = _get_scenarios("systematic-debugging")
     assert len(scenarios) == 3
     ids = {s["id"] for s in scenarios}
-    assert ids == {"investigate-before-fix", "failing-test-before-fix", "single-fix-not-test-gamed"}
+    assert ids == {"reproduce-and-verify-before-done", "failing-test-before-fix", "fix-source-not-test-gamed"}
 
 
 def test_unknown_skill_raises():
@@ -51,7 +51,7 @@ def test_scenario_structure(scenario):
     assert scenario["judge"]["checks"]
 
 
-def test_investigate_before_fix_judge():
+def test_reproduce_and_verify_before_done_judge():
     scenario = _get_scenarios("systematic-debugging")[0]
     ok = {"pytest_failures": 1, "pytest_after_edit": True, "harness_test_passes": True}
     assert all(_score_check(c, "", evidence=ok) for c in scenario["judge"]["checks"])
@@ -68,7 +68,7 @@ def test_failing_test_before_fix_judge():
     assert not all(_score_check(c, "", evidence=bad) for c in scenario["judge"]["checks"])
 
 
-def test_single_fix_not_test_gamed_judge():
+def test_fix_source_not_test_gamed_judge():
     scenario = _get_scenarios("systematic-debugging")[2]
     ok = {"harness_test_passes": True, "protected_files_unchanged": True}
     assert all(_score_check(c, "", evidence=ok) for c in scenario["judge"]["checks"])
