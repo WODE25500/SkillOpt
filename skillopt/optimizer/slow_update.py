@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import traceback
+from typing import Any
 
 from skillopt.model import chat_optimizer
 from skillopt.prompts import load_prompt
@@ -156,6 +157,37 @@ def _read_trajectory(rollout_dir: str, task_id: str) -> str:
 # ── Structured comparison pairs ─────────────────────────────────────────────
 
 
+def _is_result_success(res: dict | Any) -> bool:
+    """Determine whether a rollout result indicates success across metrics.
+
+    Handles explicit 'hard' flags, general 'score' metrics, 'exact_match',
+    and soft threshold metrics to prevent miscategorizing benchmark outcomes.
+    """
+    if not res or not isinstance(res, dict):
+        return False
+    if "hard" in res:
+        try:
+            return float(res["hard"]) >= 0.5
+        except (ValueError, TypeError):
+            return bool(res["hard"])
+    if "score" in res:
+        try:
+            return float(res["score"]) >= 0.5
+        except (ValueError, TypeError):
+            return bool(res["score"])
+    if "exact_match" in res:
+        try:
+            return float(res["exact_match"]) >= 0.5
+        except (ValueError, TypeError):
+            return bool(res["exact_match"])
+    if "soft" in res:
+        try:
+            return float(res["soft"]) >= 1.0 - 1e-6
+        except (ValueError, TypeError):
+            return bool(res["soft"])
+    return False
+
+
 def build_comparison_pairs(
     results_prev: list[dict],
     results_curr: list[dict],
@@ -183,8 +215,8 @@ def build_comparison_pairs(
         tid = str(item.get("id", ""))
         prev = prev_by_id.get(tid, {})
         curr = curr_by_id.get(tid, {})
-        prev_ok = bool(prev.get("hard", 0))
-        curr_ok = bool(curr.get("hard", 0))
+        prev_ok = _is_result_success(prev)
+        curr_ok = _is_result_success(curr)
 
         if not prev_ok and curr_ok:
             category = "improved"
@@ -201,13 +233,13 @@ def build_comparison_pairs(
             "category": category,
             "prev": {
                 "hard": int(prev_ok),
-                "soft": float(prev.get("soft", 0.0)),
+                "soft": float(prev.get("soft", 1.0 if prev_ok else 0.0)),
                 "predicted_answer": prev.get("predicted_answer", prev.get("answer", "N/A")),
                 "fail_reason": prev.get("fail_reason", ""),
             },
             "curr": {
                 "hard": int(curr_ok),
-                "soft": float(curr.get("soft", 0.0)),
+                "soft": float(curr.get("soft", 1.0 if curr_ok else 0.0)),
                 "predicted_answer": curr.get("predicted_answer", curr.get("answer", "N/A")),
                 "fail_reason": curr.get("fail_reason", ""),
             },
