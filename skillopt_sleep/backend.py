@@ -2251,8 +2251,12 @@ class DualBackend(Backend):
         return self.target.tokens_used() + self.optimizer.tokens_used()
 
     def token_delta(self) -> int:
-        # replay_one() drives attempt/attempt_with_tools -> the TARGET backend,
-        # so the call-local cost is the target's, not the optimizer's.
+        # Call-local cost for a replay attempt: replay_one() drives
+        # attempt/attempt_with_tools -> the TARGET backend, so the per-attempt
+        # delta is the target's. The optimizer only appears in replay via
+        # judge() on the rare model-judge fallback (rule/exact/answer tasks are
+        # scored locally, 0 tokens); that cost is still counted in the aggregate
+        # tokens_used() (target + optimizer), so the total is not undercounted.
         return getattr(self.target, "token_delta", lambda: 0)()
 
 
