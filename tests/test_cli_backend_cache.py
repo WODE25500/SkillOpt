@@ -138,6 +138,56 @@ def test_token_delta_isolated_between_threads():
         assert deltas[i] > 0, f"worker {i} got no call-local delta"
 
 
+def test_cache_hit_resets_token_delta():
+    """A cache hit must reset the per-thread delta (store-then-load reuse)."""
+    b = _EchoBackend()
+    b._cached_call("k:1", "hello")  # miss
+    assert b.token_delta() > 0
+    b._cached_call("k:1", "hello")  # hit
+    assert b.token_delta() == 0, "cache hit leaked the previous call's delta"
+
+
+def test_concurrent_missing_charges_every_real_call():
+    """A barrier-forced same-key concurrent miss must charge every real call."""
+    n = 6
+    barrier = threading.Barrier(n)
+
+    class _BarrierBackend(_EchoBackend):
+        def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
+            barrier.wait(timeout=5)
+            return super()._call(prompt, max_tokens=max_tokens)
+
+    b = _BarrierBackend()
+    threads = [threading.Thread(target=lambda: b._cached_call("k:1", "hello")) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    per = len("hello") // 4 + len("resp:hello") // 4
+    assert b.calls == n
+    assert b._tokens == per * b.calls, "concurrent misses undercounted real calls"
+
+
+def test_dual_backend_token_delta_returns_target():
+    """DualBackend.token_delta() must report the target backend's call cost."""
+    from skillopt_sleep.backend import DualBackend
+
+    target = _EchoBackend()
+    target._cached_call("k:1", "hello")
+    optimizer = _EchoBackend()
+    db = DualBackend(target=target, optimizer=optimizer)
+    assert db.token_delta() == target.token_delta()
+
+
+def test_cmd_harvest_redact_deep_is_key_aware():
+    """_redact_deep must key-aware redact — `{"api_key": "x"}` used to leak."""
+    from skillopt_sleep.__main__ import _redact_deep
+
+    out = _redact_deep({"api_key": "x", "content": "keep me", "nested": {"token": "y"}})
+    assert out == {"api_key": "[REDACTED]", "content": "keep me", "nested": {"token": "[REDACTED]"}}
+
+
 def test_concurrent_pi_empty_and_success_preserve_success(monkeypatch):
     """A failed (empty) Pi worker must not clobber another worker's success."""
     from skillopt_sleep.backend import PiCliBackend

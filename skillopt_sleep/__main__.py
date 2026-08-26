@@ -334,15 +334,16 @@ def _handoff_dir_for(cfg) -> str:
 
 
 def _redact_deep(obj):
-    """Redact secret-looking substrings in every string of a JSON-like tree."""
+    """Redact secrets key-aware across the whole structure (see redact_secrets).
+
+    This used to recurse values and only scrub string leaves, losing the
+    mapping-key context — so ``{"api_key": "x"}`` leaked. Delegating to the
+    key-aware ``redact_secrets`` walker fixes every output boundary that routes
+    through this helper (--json, digests/snapshot files, gate_trials, extra,
+    display) at once, keeping them all consistent.
+    """
     from skillopt_sleep.staging import redact_secrets
-    if isinstance(obj, str):
-        return redact_secrets(obj)
-    if isinstance(obj, list):
-        return [_redact_deep(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _redact_deep(v) for k, v in obj.items()}
-    return obj
+    return redact_secrets(obj)
 
 
 def _display_error(exc: object) -> str:
@@ -810,7 +811,7 @@ def cmd_harvest(args) -> int:
     if getattr(args, "output", ""):
         output_path = write_tasks_file(args.output, redact_secrets(payload))
     if args.json:
-        json_payload = _redact_deep(payload)
+        json_payload = redact_secrets(payload)
         if output_path:
             json_payload["output"] = output_path
         print(json.dumps(json_payload, ensure_ascii=False, indent=2))

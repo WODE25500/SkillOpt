@@ -350,6 +350,8 @@ class CliBackend(Backend):
         with self._lock:
             cached = self._cache.get(key)
         if cached is not None:
+            # cover: later cache hit must not report the previous call's delta.
+            self._thread_local.delta = 0
             # cache hits log key-only (the full text is on the original miss event)
             if ev is not None:
                 ev.log("replay", "model_call", kind=kind, cache_hit=True, key=key,
@@ -362,20 +364,20 @@ class CliBackend(Backend):
         out = self._call(prompt, max_tokens=max_tokens)
         delta = len(prompt) // 4 + len(out) // 4
         with self._lock:
+            # Charge every real call's tokens. A concurrent miss may duplicate a
+            # paid call; we count each real call rather than undercount. The cache
+            # dedup below may reuse another worker's success, but the model call
+            # above still consumed tokens.
+            self._tokens += delta
             existing = self._cache.get(key)
             if existing:
-                # A success was cached by another worker; prefer it (dedup) so
-                # an empty/duplicate never overwrites a concurrent success.
+                # A success was cached by another worker; prefer it (dedup) so an
+                # empty/duplicate never overwrites a concurrent success.
                 out = existing
-                delta = 0
             elif out:
                 # This worker succeeded and nothing is cached: cache it.
-                self._tokens += delta
                 self._cache[key] = out
-            else:
-                # Empty result + nothing cached: transient failure — don't cache
-                # it (so it isn't sticky), but count the call's tokens.
-                self._tokens += delta
+            # else: empty result + nothing cached -> don't cache (transient failure)
         # Call-local accounting: record this call's delta on the calling thread
         # so parallel replay_one() reads its own cost, not a before/after total
         # that another worker inflates.
@@ -2247,6 +2249,11 @@ class DualBackend(Backend):
 
     def tokens_used(self):
         return self.target.tokens_used() + self.optimizer.tokens_used()
+
+    def token_delta(self) -> int:
+        # replay_one() drives attempt/attempt_with_tools -> the TARGET backend,
+        # so the call-local cost is the target's, not the optimizer's.
+        return getattr(self.target, "token_delta", lambda: 0)()
 
 
 # ── Azure OpenAI backend (gpt-5.x via managed identity) ───────────────────────
