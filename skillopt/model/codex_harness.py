@@ -1526,6 +1526,33 @@ _CURSOR_SECRET_TRACE_FIELDS = {
 # secret key in non-JSON text are not stripped (valid-JSON lines already go
 # through the structural walker). Add an unbounded nest parser if that ever
 # appears in real stderr.
+_COPILOT_SECRET_KEY_SUFFIXES = (
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "token",
+    "password",
+    "passwd",
+    "clientsecret",
+    "secret",
+    "secretkey",
+    "secretaccesskey",
+    "sharedaccesskey",
+    "privatekey",
+    "accountkey",
+    "cookie",
+    "setcookie",
+)
+_COPILOT_SECRET_KEY_EXACT = {"pwd", "sig", "authorization"}
+
+# Matching is two-level: the regex only ENGAGES quoted keys containing a
+# secret seed (so it never swallows a non-secret object like ``"a": {...}``),
+# and the callback decides with the project's endswith-based rule so
+# token_count / token_budget / secret_version diagnostics are NOT scrubbed.
+# ponytail: the object branch is single-level only; deep-nested values under a
+# secret key in non-JSON text are not stripped (valid-JSON lines already go
+# through the structural walker). Add an unbounded nest parser if that ever
+# appears in real stderr.
 _COPILOT_QUOTED_JSON_KEY = re.compile(
     r'(?i)"([^"\\]*(?:token|apikey|api[_-]?key|secret|password|authorization|'
     r'bearer|cookie|setcookie)[^"\\]*)"\s*:\s*(?P<val>'
@@ -1538,6 +1565,13 @@ _COPILOT_QUOTED_JSON_KEY = re.compile(
 
 
 def _redact_quoted_json_pair(match: re.Match) -> str:
+    key = match.group(1)
+    compact = re.sub(r"[^a-z0-9]", "", key.strip().casefold())
+    if not (
+        compact in _COPILOT_SECRET_KEY_EXACT
+        or compact.endswith(_COPILOT_SECRET_KEY_SUFFIXES)
+    ):
+        return match.group(0)
     return f'{match.group(1)}: "[REDACTED]"'
 
 

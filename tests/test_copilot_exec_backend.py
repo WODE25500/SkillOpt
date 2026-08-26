@@ -546,6 +546,24 @@ def test_sanitize_cursor_trace_redacts_quoted_json_in_stderr() -> None:
     assert "[REDACTED]" in out
 
 
+def test_redact_cursor_error_keeps_token_budget_diagnostics() -> None:
+    # Endswith-based key detection must NOT scrub non-credential diagnostics that
+    # merely contain a secret-ish substring (token_count / token_budget /
+    # secret_version), while still scrubbing real credential keys.
+    out = harness._redact_cursor_error(
+        '{"token_count": 3, "token_budget": 10, "secret_version": "v1", '
+        '"api_key": "x", "refreshToken": "y"}'
+    )
+    # Non-credential diagnostics with a secret-ish substring are KEPT.
+    assert '"token_count": 3' in out
+    assert '"token_budget": 10' in out
+    assert '"secret_version": "v1"' in out
+    # Real credential keys are still scrubbed.
+    assert '"api_key": "x"' not in out
+    assert '"refreshToken": "y"' not in out
+    assert out.count("[REDACTED]") == 2
+
+
 
 def test_run_target_exec_dispatches_to_copilot(monkeypatch, tmp_path) -> None:
     model.set_backend("copilot_exec")
