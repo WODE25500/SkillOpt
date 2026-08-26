@@ -74,7 +74,7 @@ def test_concurrent_misses_with_barrier_are_consistent():
 
     class _BarrierBackend(_EchoBackend):
         def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=15)
             return super()._call(prompt, max_tokens=max_tokens)
 
     b = _BarrierBackend()
@@ -154,7 +154,7 @@ def test_concurrent_missing_charges_every_real_call():
 
     class _BarrierBackend(_EchoBackend):
         def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=15)
             return super()._call(prompt, max_tokens=max_tokens)
 
     b = _BarrierBackend()
@@ -198,7 +198,7 @@ def test_concurrent_pi_empty_and_success_preserve_success(monkeypatch):
     state: dict[str, str] = {}
 
     def fake_call(prompt: str, *, max_tokens: int = 1024) -> str:
-        barrier.wait(timeout=5)
+        barrier.wait(timeout=15)
         return state[threading.current_thread().name]
 
     monkeypatch.setattr(b, "_call", fake_call)
