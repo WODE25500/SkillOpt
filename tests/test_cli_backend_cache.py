@@ -180,6 +180,49 @@ def test_dual_backend_token_delta_returns_target():
     assert db.token_delta() == target.token_delta()
 
 
+def test_attempt_with_tools_sets_call_local_delta(monkeypatch):
+    """Tool-aware replay must set the thread-local delta so replay_one() sees
+    real call-local usage instead of falling back to a response-length estimate."""
+    from types import SimpleNamespace
+
+    import skillopt_sleep.backend as backend_mod
+    from skillopt_sleep.backend import ClaudeCliBackend
+
+    b = ClaudeCliBackend(model="", claude_path="claude", timeout=10)
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(backend_mod.subprocess, "run", fake_run)
+
+    task = SimpleNamespace(intent="intent", context_excerpt="ctx")
+    response, called = b.attempt_with_tools(task, skill="s", memory="m", tools=["search"])
+    assert response == "ok"
+    assert b.token_delta() > 0, "attempt_with_tools did not set call-local delta"
+
+
+def test_dual_backend_attempt_with_tools_sets_target_delta(monkeypatch):
+    """The dual-backend tool-replay path must also surface the target's delta."""
+    from types import SimpleNamespace
+
+    import skillopt_sleep.backend as backend_mod
+    from skillopt_sleep.backend import ClaudeCliBackend, DualBackend
+
+    target = ClaudeCliBackend(model="", claude_path="claude", timeout=10)
+    optimizer = ClaudeCliBackend(model="", claude_path="claude", timeout=10)
+    db = DualBackend(target=target, optimizer=optimizer)
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(backend_mod.subprocess, "run", fake_run)
+
+    task = SimpleNamespace(intent="intent", context_excerpt="ctx")
+    response, called = db.attempt_with_tools(task, skill="s", memory="m", tools=["search"])
+    assert response == "ok"
+    assert db.token_delta() > 0, "dual-backend tool replay did not set target delta"
+
+
 def test_cmd_harvest_redact_deep_is_key_aware():
     """_redact_deep must key-aware redact — `{"api_key": "x"}` used to leak."""
     from skillopt_sleep.__main__ import _redact_deep

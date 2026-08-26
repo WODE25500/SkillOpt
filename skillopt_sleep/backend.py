@@ -913,7 +913,11 @@ class ClaudeCliBackend(CliBackend):
                     "Claude CLI could not be executed: %s", exc,
                 )
                 resp = ""
-            self._tokens += len(prompt) // 4 + len(resp) // 4
+            delta = len(prompt) // 4 + len(resp) // 4
+            self._tokens += delta
+            # Call-local accounting: replay_one() reads token_delta() after
+            # attempt_with_tools(), so record this call's cost on the thread.
+            self._thread_local.delta = delta
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:
@@ -1413,10 +1417,14 @@ class OpenCodeCliBackend(CliBackend):
                     name for name, tool_id in project.tool_mapping.items() if tool_id in called
                 ]
         except OpenCodeError as exc:
-            self._tokens += exc.prompt_chars // 4
+            delta = exc.prompt_chars // 4
+            self._tokens += delta
+            self._thread_local.delta = delta
             self.last_call_error = str(exc)
             return "", []
-        self._tokens += len(prompt) // 4 + len(text) // 4
+        delta = len(prompt) // 4 + len(text) // 4
+        self._tokens += delta
+        self._thread_local.delta = delta
         return text, called_tools
 
 
@@ -1694,7 +1702,9 @@ class CodexCliBackend(CliBackend):
                 self.last_call_error = (
                     f"codex exec (tools) exited {proc.returncode}: {(proc.stderr or '')[:500]}"
                 )
-            self._tokens += len(prompt) // 4 + len(resp) // 4
+            delta = len(prompt) // 4 + len(resp) // 4
+            self._tokens += delta
+            self._thread_local.delta = delta
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:
@@ -1960,7 +1970,9 @@ class CopilotCliBackend(CliBackend):
                 resp = self._parse_jsonl_response(proc.stdout or "")
             except Exception:
                 resp = ""
-            self._tokens += len(prompt) // 4 + len(resp) // 4
+            delta = len(prompt) // 4 + len(resp) // 4
+            self._tokens += delta
+            self._thread_local.delta = delta
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:

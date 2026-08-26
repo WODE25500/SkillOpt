@@ -22,12 +22,13 @@ def test_redact_secrets_is_mapping_key_aware():
     assert not _contains(out, "deep-secret")
 
 
-def test_redact_deep_loses_mapping_key_context():
-    """_redact_deep recurses values only; a secret value under a secret-named
-    key is treated as a bare string and left intact (the original bug)."""
-    data = {"api_key": "top-secret"}
+def test_redact_deep_is_mapping_key_aware():
+    """_redact_deep now delegates to the key-aware redact_secrets, so a secret
+    value under a secret-named key is redacted (the old value-losing bug)."""
+    data = {"api_key": "top-secret", "content": "keep me"}
     out = _redact_deep(data)
-    assert _contains(out, "top-secret")
+    assert "top-secret" not in str(out), "secret still leaked"
+    assert "keep me" in str(out), "diagnostic content lost"
 
 
 def test_report_md_is_redacted_as_string():
