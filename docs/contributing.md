@@ -73,6 +73,12 @@ mkdocs serve  # Preview at http://localhost:8000
 4. Run focused tests, the full test suite, and `mkdocs build --strict` when docs change
 5. Submit a PR with a clear description
 
+## Code Review Guidelines
+
+We maintain a [code review & contribution guide](review_guidelines.md) distilled
+from maintainer review feedback. Reviewers and contributors should use it as a
+shared checklist before merging.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

@@ -62,6 +62,7 @@ nav:
     - CLI Reference: reference/cli.md
     - API Reference: reference/api.md
   - Contributing: contributing.md
+  - Code Review Guidelines: review_guidelines.md
 
 markdown_extensions:
   - admonition
