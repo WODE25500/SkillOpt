@@ -458,6 +458,95 @@ def test_nonzero_exit_raises_with_detail(monkeypatch, tmp_path) -> None:
         harness.run_copilot_exec(work_dir=str(tmp_path), prompt="p", model="", timeout=30)
 
 
+# --- copilot trace redaction: quoted JSON embedded in non-JSON surf --------
+
+
+def _fake_run_with_stderr(captured: dict, stderr: str, stdout: str = "", returncode: int = 0):
+    def _run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env") or {}
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+    return _run
+
+
+def test_copilot_trace_redacts_prefixed_quoted_json() -> None:
+    # The CLI prefixes real-stream stderr with non-JSON text (e.g. "warning:"),
+    # so the whole line is NOT valid JSON and used to fall back to the
+    # unquoted-keyword redactor, leaking quoted JSON secret payloads.
+    raw = 'warning: {"token":"plain-secret"}\nstill here {"api_key": "ghp_abcdef"}\n'
+    out = harness._redact_copilot_trace(raw)
+    assert "plain-secret" not in out
+    assert "ghp_abcdef" not in out
+    assert "[REDACTED]" in out
+
+
+def test_copilot_trace_redacts_quoted_json_across_valid_and_prefixed_lines() -> None:
+    # One structurally-valid JSON line + one non-JSON prefixed line; both carry
+    # a quoted secret and both must be stripped.
+    raw = (
+        '{"token": "first-secret"}\n'
+        'warning: {"a": {"refreshToken": "second-secret"}}\n'
+    )
+    out = harness._redact_copilot_trace(raw)
+    assert "first-secret" not in out
+    assert "second-secret" not in out
+    assert "[REDACTED]" in out
+
+
+def test_run_copilot_exec_redacts_secret_in_stderr_trace(monkeypatch, tmp_path) -> None:
+    model.set_backend("copilot")
+    model.configure_copilot_exec(path="copilot", home="", allow_all_tools=False)
+    captured: dict = {}
+    stdout = json.dumps({"type": "assistant.message", "data": {"content": "ok"}})
+    stderr = 'warning: {"token":"plain-secret"}\n'
+    monkeypatch.setattr(harness.subprocess, "run", _fake_run_with_stderr(captured, stderr, stdout=stdout))
+
+    response, raw = harness.run_copilot_exec(work_dir=str(tmp_path), prompt="p", model="", timeout=30)
+
+    assert response == "ok"
+    assert "plain-secret" not in raw
+    assert "[REDACTED]" in raw
+
+
+def test_run_copilot_exec_redacts_secret_in_error_detail(monkeypatch, tmp_path) -> None:
+    model.set_backend("copilot")
+    model.configure_copilot_exec(path="copilot", home="", allow_all_tools=False)
+    captured: dict = {}
+    stderr = 'warning: {"token":"plain-secret"}\n'
+    monkeypatch.setattr(harness.subprocess, "run", _fake_run_with_stderr(captured, stderr, returncode=3))
+
+    with pytest.raises(RuntimeError) as exc:
+        harness.run_copilot_exec(work_dir=str(tmp_path), prompt="p", model="", timeout=30)
+
+    assert "plain-secret" not in str(exc.value)
+    assert "[REDACTED]" in str(exc.value)
+
+
+def test_redact_cursor_error_redacts_quoted_json_with_spaces() -> None:
+    # The unquoted keyword regex truncates at the FIRST whitespace, so a quoted
+    # JSON value that contains spaces used to leak its remainder. This is the
+    # shared string redactor used by the copilot fallback AND cursor stderr.
+    out = harness._redact_cursor_error('warning: {"token": "ab cd ef"}')
+    assert "ab cd ef" not in out
+    assert "[REDACTED]" in out
+
+
+def test_sanitize_cursor_trace_redacts_quoted_json_in_stderr() -> None:
+    # Cursor's trace redactor routes real stderr lines through the same shared
+    # `_redact_cursor_error`; it must not leak quoted JSON values with spaces.
+    raw = (
+        "===== CURSOR CLI ATTEMPT 1 =====\n"
+        "[stderr]\n"
+        'warning: {"token": "a b c"}\n'
+    )
+    out = harness._sanitize_cursor_trace(raw, preserve_markers=True)
+    assert "a b c" not in out
+    assert "[REDACTED]" in out
+
+
+
 def test_run_target_exec_dispatches_to_copilot(monkeypatch, tmp_path) -> None:
     model.set_backend("copilot_exec")
     called: dict = {}

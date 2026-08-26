@@ -1514,8 +1514,37 @@ _CURSOR_SECRET_TRACE_FIELDS = {
 }
 
 
+# ``"token": "..."`` / ``"accessToken": {...}`` quoted JSON pairs, matched in
+# arbitrary (possibly non-JSON) text. Value may be a string, number, bool, or a
+# nested object/array literal quoted as a unit — we redact the whole payload.
+# Applied FIRST inside ``_redact_cursor_error``: the unquoted keyword regex below
+# stops at the first whitespace, so ``"token": "a b c"`` would otherwise leak
+# ``b c"``. Capturing the whole quoted payload up front fixes that, and since
+# ``_redact_cursor_error`` is the single shared string redactor, one change
+# covers the copilot fallback, the cursor stderr paths, and string leaves.
+# ponytail: the object branch is single-level only; deep-nested values under a
+# secret key in non-JSON text are not stripped (valid-JSON lines already go
+# through the structural walker). Add an unbounded nest parser if that ever
+# appears in real stderr.
+_COPILOT_QUOTED_JSON_KEY = re.compile(
+    r'(?i)"([^"\\]*(?:token|apikey|api[_-]?key|secret|password|authorization|'
+    r'bearer|cookie|setcookie)[^"\\]*)"\s*:\s*(?P<val>'
+    r'"(?:\\.|[^"\\])*"'  # JSON string value
+    r'|\[[^\]]*\]'  # JSON array literal
+    r'|\{[^{}]*\}'  # JSON object literal (single level)
+    r'|[^\s,]+'  # bare token / number / bool
+    r')'
+)
+
+
+def _redact_quoted_json_pair(match: re.Match) -> str:
+    return f'{match.group(1)}: "[REDACTED]"'
+
+
 def _redact_cursor_error(value: str) -> str:
-    text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", value or "")
+    text = value or ""
+    text = _COPILOT_QUOTED_JSON_KEY.sub(_redact_quoted_json_pair, text)
+    text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
     return _CURSOR_SECRET_TOKEN.sub("[REDACTED]", text)
 
 
