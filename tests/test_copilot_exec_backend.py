@@ -524,7 +524,37 @@ def test_run_copilot_exec_redacts_secret_in_error_detail(monkeypatch, tmp_path) 
     assert "[REDACTED]" in str(exc.value)
 
 
-def test_redact_cursor_error_redacts_quoted_json_with_spaces() -> None:
+def test_run_copilot_exec_redacts_camelcase_key_in_stderr_trace(monkeypatch, tmp_path) -> None:
+    # A camelCase secret key (githubToken) in valid JSON must be redacted (the
+    # structural walker used to miss it).
+    model.set_backend("copilot")
+    model.configure_copilot_exec(path="copilot", home="", allow_all_tools=False)
+    captured: dict = {}
+    stdout = json.dumps({"type": "assistant.message", "data": {"content": "ok"}})
+    stderr = '{"githubToken":"plain-secret"}\n'
+    monkeypatch.setattr(harness.subprocess, "run", _fake_run_with_stderr(captured, stderr, stdout=stdout))
+
+    response, raw = harness.run_copilot_exec(work_dir=str(tmp_path), prompt="p", model="", timeout=30)
+
+    assert response == "ok"
+    assert "plain-secret" not in raw
+    assert "[REDACTED]" in raw
+
+
+def test_run_copilot_exec_redacts_deep_nested_embedded_json_in_error_detail(monkeypatch, tmp_path) -> None:
+    # A deeply nested JSON fragment embedded in a non-JSON error line must not
+    # leak (the old single-level regex could not).
+    model.set_backend("copilot")
+    model.configure_copilot_exec(path="copilot", home="", allow_all_tools=False)
+    captured: dict = {}
+    stderr = 'warning: {"a":{"b":{"token":"deep-secret"}}}\n'
+    monkeypatch.setattr(harness.subprocess, "run", _fake_run_with_stderr(captured, stderr, returncode=3))
+
+    with pytest.raises(RuntimeError) as exc:
+        harness.run_copilot_exec(work_dir=str(tmp_path), prompt="p", model="", timeout=30)
+
+    assert "deep-secret" not in str(exc.value)
+    assert "[REDACTED]" in str(exc.value)
     # The unquoted keyword regex truncates at the FIRST whitespace, so a quoted
     # JSON value that contains spaces used to leak its remainder. This is the
     # shared string redactor used by the copilot fallback AND cursor stderr.

@@ -1545,39 +1545,83 @@ _COPILOT_SECRET_KEY_SUFFIXES = (
 )
 _COPILOT_SECRET_KEY_EXACT = {"pwd", "sig", "authorization", "bearer"}
 
-# Matching is two-level: the regex only ENGAGES quoted keys containing a
-# secret seed (so it never swallows a non-secret object like ``"a": {...}``),
-# and the callback decides with the project's endswith-based rule so
-# token_count / token_budget / secret_version diagnostics are NOT scrubbed.
-# ponytail: the object branch is single-level only; deep-nested values under a
-# secret key in non-JSON text are not stripped (valid-JSON lines already go
-# through the structural walker). Add an unbounded nest parser if that ever
-# appears in real stderr.
-_COPILOT_QUOTED_JSON_KEY = re.compile(
-    r'(?i)"([^"\\]*(?:token|apikey|api[_-]?key|secret|password|authorization|'
-    r'bearer|cookie|setcookie)[^"\\]*)"\s*:\s*(?P<val>'
-    r'"(?:\\.|[^"\\])*"'  # JSON string value
-    r'|\[[^\]]*\]'  # JSON array literal
-    r'|\{[^{}]*\}'  # JSON object literal (single level)
-    r'|[^\s,]+'  # bare token / number / bool
-    r')'
-)
+def _is_copilot_secret_key(field: str) -> bool:
+    """The single mapping-aware secret-key policy for the Copilot path.
+
+    Uses endswith on the compacted key (mirroring ``_is_secret_mapping_key``), so
+    ``token`` / ``api_key`` / ``refreshToken`` / ``bearer`` / ``cookie`` are
+    redacted, but ``token_count`` / ``token_budget`` / ``secret_version``
+    diagnostics are preserved.
+    """
+    compact = re.sub(r"[^a-z0-9]", "", (field or "").casefold())
+    return compact in _COPILOT_SECRET_KEY_EXACT or compact.endswith(_COPILOT_SECRET_KEY_SUFFIXES)
 
 
-def _redact_quoted_json_pair(match: re.Match) -> str:
-    key = match.group(1)
-    compact = re.sub(r"[^a-z0-9]", "", key.strip().casefold())
-    if not (
-        compact in _COPILOT_SECRET_KEY_EXACT
-        or compact.endswith(_COPILOT_SECRET_KEY_SUFFIXES)
-    ):
-        return match.group(0)
-    return f'{match.group(1)}: "[REDACTED]"'
+def _find_json_end(text: str, start: int) -> int | None:
+    """Bracket-match a JSON object/array starting at ``start`` (unbounded nesting).
+
+    String-aware (handles quotes and escapes), so a ``{`` inside a string value
+    does not confuse the matching.
+    """
+    open_ch = text[start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    in_str = False
+    escaped = False
+    for k in range(start, len(text)):
+        ch = text[k]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return k
+    return None
+
+
+def _redact_embedded_json(text: str) -> str:
+    """Structurally redact JSON objects/arrays embedded in plain text.
+
+    Finds balanced JSON fragments (unbounded nesting, string-aware) and walks
+    each with the mapping-aware redactor, so deeply nested or pretty-printed
+    JSON embedded in a non-JSON line no longer leaks. Non-JSON text is preserved.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "{[":
+            end = _find_json_end(text, i)
+            if end is not None:
+                frag = text[i:end + 1]
+                try:
+                    obj = json.loads(frag)
+                except (ValueError, TypeError):
+                    out.append(ch)
+                    i += 1
+                    continue
+                out.append(json.dumps(_redact_copilot_json(obj), ensure_ascii=False))
+                i = end + 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _redact_cursor_error(value: str) -> str:
     text = value or ""
-    text = _COPILOT_QUOTED_JSON_KEY.sub(_redact_quoted_json_pair, text)
+    text = _redact_embedded_json(text)
     text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
     return _CURSOR_SECRET_TOKEN.sub("[REDACTED]", text)
 
@@ -1609,12 +1653,10 @@ def _redact_copilot_json(value: Any, *, field: str = "") -> Any:
     Unlike the cursor trace sanitizer, this does NOT omit ``content``/``prompt``
     (those are the CLI output we want to keep debuggable); it redacts by secret
     field name and applies the string-level redactor to remaining string leaves.
+    Uses the SAME key policy as the embedded-JSON fallback so valid JSON and
+    non-JSON fragments agree on what a secret field is.
     """
-    normalized_field = re.sub(r"[^a-z0-9]", "", field.lower())
-    if (
-        normalized_field in _CURSOR_SECRET_TRACE_FIELDS
-        or normalized_field.endswith("apikey")
-    ):
+    if _is_copilot_secret_key(field):
         return "[REDACTED]"
     if isinstance(value, dict):
         return {
@@ -1629,28 +1671,16 @@ def _redact_copilot_json(value: Any, *, field: str = "") -> Any:
 
 
 def _redact_copilot_trace(raw: str | bytes) -> str:
-    """Structurally sanitize Copilot JSONL output (mapping-key aware).
+    """Sanitize Copilot JSONL output (mapping-key aware, unbounded nesting).
 
-    ``_redact_cursor_error`` catches unquoted ``key=value`` forms, but the
-    Copilot JSONL stream carries ``"token": "..."`` objects. Parse each line
-    and walk it with the field-name-aware sanitizer; non-JSON lines still fall
-    through the string-level redactor.
+    The whole text is scanned for JSON objects/arrays (single-line, multiple
+    fragments, or pretty-printed / deeply nested) and each is walked with the
+    mapping-aware redactor; remaining non-JSON text gets string-level redaction
+    for ``key=value`` and token patterns. This replaces the old line-by-line
+    regex, which only handled single-level object values.
     """
     text = _cursor_process_text(raw)
-    lines_out: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            lines_out.append(line)
-            continue
-        try:
-            obj = json.loads(stripped)
-        except (ValueError, TypeError):
-            lines_out.append(_redact_cursor_error(line))
-            continue
-        obj = _redact_copilot_json(obj)
-        lines_out.append(json.dumps(obj, ensure_ascii=False))
-    return "\n".join(lines_out)
+    return _redact_cursor_error(text)
 
 
 def _cursor_process_text(value: str | bytes) -> str:
