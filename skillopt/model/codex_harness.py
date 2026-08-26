@@ -1543,7 +1543,7 @@ _COPILOT_SECRET_KEY_SUFFIXES = (
     "cookie",
     "setcookie",
 )
-_COPILOT_SECRET_KEY_EXACT = {"pwd", "sig", "authorization"}
+_COPILOT_SECRET_KEY_EXACT = {"pwd", "sig", "authorization", "bearer"}
 
 # Matching is two-level: the regex only ENGAGES quoted keys containing a
 # secret seed (so it never swallows a non-secret object like ``"a": {...}``),

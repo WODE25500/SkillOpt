@@ -564,6 +564,15 @@ def test_redact_cursor_error_keeps_token_budget_diagnostics() -> None:
     assert out.count("[REDACTED]") == 2
 
 
+def test_redact_cursor_error_redacts_bare_bearer_key() -> None:
+    # A standalone "bearer" key is a credential marker (the exact set covers it);
+    # the common "Authorization": "Bearer ..." form is also scrubbed via the
+    # authorization key.
+    out = harness._redact_cursor_error('{"bearer": "mysecrettoken"}')
+    assert '"bearer": "mysecrettoken"' not in out
+    assert "[REDACTED]" in out
+
+
 
 def test_run_target_exec_dispatches_to_copilot(monkeypatch, tmp_path) -> None:
     model.set_backend("copilot_exec")
