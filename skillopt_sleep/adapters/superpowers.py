@@ -22,11 +22,16 @@ test) — it deliberately does NOT attempt to judge whether the agent genuinely
 understood the root cause (a rule judge cannot; the OSS project uses an LLM
 verifier for skill compliance).
 
-OPT-IN REAL-HARNESS SMOKE (documented; not run automatically / not run here
-because this contribution was developed without a working Claude/Codex CLI):
-    python -m skillopt_sleep.adapters.superpowers --skill systematic-debugging
-Run on a host with an authenticated ``claude`` CLI (see the harness note
-below). Add ``--scenario <id>`` for a single case.
+OPT-IN REAL-HARNESS SMOKE (documented; NOT run here — this PR was developed
+without an authenticated Claude/Codex CLI on a POSIX host, so the live harness
+runs were not executed):
+    python -m skillopt_sleep.adapters.superpowers --skill systematic-debugging \
+        [--scenario <id>] [--compare-baseline]
+Run on a POSIX host with an authenticated ``claude`` CLI (see the harness note
+below). The ordered reproduce-before-fix sequence and the baseline-versus-skill
+comparison are validated here ONLY with offline fixtures + adversarial-order
+unit tests; the real-harness runs (including ``--compare-baseline``) remain to be
+executed on such a host.
 
 Usage:
     from skillopt_sleep.adapters.superpowers import SuperpowersEvaluator
@@ -50,6 +55,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -331,7 +337,7 @@ SYSTEMATIC_DEBUGGING_SCENARIOS: List[Dict[str, Any]] = [
             "type": "rule",
             "checks": [
                 {"op": "pytest_failures", "arg": 1, "description": "Must observe the initial failing test (reproduce before fixing)"},
-                {"op": "pytest_after_edit", "description": "Must re-run pytest after the fix (verify before claiming done)"},
+                {"op": "pytest_reproduce_fix_order", "description": "A failing run must precede the first fix edit AND a passing run follow the last edit (ordered reproduce-before-fix / verify-after-fix)"},
                 {"op": "harness_test_passes", "description": "Harness re-run confirms the test really passes"},
             ],
         },
@@ -352,6 +358,7 @@ SYSTEMATIC_DEBUGGING_SCENARIOS: List[Dict[str, Any]] = [
             "checks": [
                 {"op": "pytest_failures", "arg": 1, "description": "Must establish the failing case before fixing (Phase 4)"},
                 {"op": "pytest_successes", "arg": 1, "description": "The fix produces a passing pytest run"},
+                {"op": "pytest_reproduce_fix_order", "description": "A failing run must precede the first fix edit AND a passing run follow the last edit"},
                 {"op": "harness_test_passes", "description": "Harness re-run confirms the test is green"},
             ],
         },
@@ -497,6 +504,10 @@ def _score_check(
     elif op == "pytest_after_edit":
         # harness-collected: shim log mtime vs newest project source mtime
         return evidence.get("pytest_after_edit") is True
+    elif op == "pytest_reproduce_fix_order":
+        # harness-collected: ordered event sequence (fail before first edit,
+        # pass after last edit) — the strong reproduce-before-fix check.
+        return evidence.get("pytest_reproduce_fix_order") is True
     elif op == "pytest_runs":
         # harness-collected: counted by the nonce-tagged pytest shim
         return int(evidence.get("pytest_runs", 0)) >= int(arg or 1)
@@ -592,12 +603,75 @@ def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str) -> None:
         )
 
 
+def _watch_edits(
+    audit_log: Path,
+    project_dir: Path,
+    nonce: str,
+    stop: threading.Event,
+    interval: float = 0.05,
+) -> None:
+    """Log ``{nonce} edit <name> <mtime_ns>`` whenever a ``.py`` source file
+    changes, so the audit log holds an ORDERED sequence of edits interleaved
+    with pytest run/result events. Runs in a background thread while the agent
+    executes; the initial state (setup files) is cached and not logged.
+    """
+    last: Dict[str, int] = {}
+    while not stop.is_set():
+        try:
+            for p in project_dir.rglob("*.py"):
+                try:
+                    mt = p.stat().st_mtime_ns
+                except OSError:
+                    continue
+                if mt != last.get(str(p), mt):
+                    last[str(p)] = mt
+                    with open(audit_log, "a", encoding="utf-8") as fh:
+                        fh.write(f"{nonce} edit {p.name} {mt}\n")
+                        fh.flush()
+        except Exception:  # noqa: BLE001 — watcher must never crash the run
+            pass
+        stop.wait(interval)
+
+
+def _pytest_reproduce_fix_order(audit_log: Path, nonce: str) -> bool:
+    """True iff a FAILING pytest run precedes the first source edit AND a PASSING
+    pytest run follows the last edit (reproduce-before-fix, verify-after-fix).
+
+    Reads the ordered event sequence from the audit log (edit lines from the
+    watcher + run/result lines from the pytest shim). Fails closed if there is no
+    recorded edit, or the failing/passing runs are not in the required order.
+    This replaces the old ``_pytest_after_edit`` mtime comparison, which could
+    not distinguish an edit→fail→edit→pass sequence from a true fail→fix→verify.
+    """
+    try:
+        lines = audit_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    edit_re = re.compile(rf"^{re.escape(nonce)} edit \S+ \d+$")
+    result_re = re.compile(rf"^{re.escape(nonce)} result \d+: (-?\d+)$")
+    events: List[str] = []
+    for line in lines:
+        if edit_re.match(line):
+            events.append("edit")
+            continue
+        m = result_re.match(line)
+        if m:
+            events.append("fail" if int(m.group(1)) != 0 else "pass")
+    edit_idx = [i for i, e in enumerate(events) if e == "edit"]
+    if not edit_idx:
+        return False
+    first_edit, last_edit = edit_idx[0], edit_idx[-1]
+    fail_before = any(i < first_edit for i, e in enumerate(events) if e == "fail")
+    pass_after = any(i > last_edit for i, e in enumerate(events) if e == "pass")
+    return fail_before and pass_after
+
+
 def _pytest_after_edit(audit_log: Path, project_dir: Path) -> bool:
     """True if the last pytest invocation happened after the last source edit.
 
-    mtime comparison, not a full event log: the shim appends on every run, so the
-    log's mtime IS the last-run time. Fails closed if never run. Sufficient under
-    the trusted-candidate scope; a hostile agent could backdate a file's mtime.
+    Weak mtime comparison; kept for the verification-before-completion pack and
+    its tests. The systematic-debugging pack uses the stronger
+    ``_pytest_reproduce_fix_order`` (ordered event sequence) instead.
     """
     try:
         last_run = audit_log.stat().st_mtime_ns
@@ -894,6 +968,15 @@ def _run_scenario(
         cmd.extend(["--allowedTools", "Bash,Edit,Write,Read"])
 
     t0 = time.time()
+    # Watch for source edits while the agent runs, so the audit log carries an
+    # ORDERED event sequence (edits + pytest runs) for reproduce-before-fix.
+    watch_stop = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_edits,
+        args=(audit_log, project_dir, run_nonce, watch_stop),
+        daemon=True,
+    )
+    watcher.start()
     try:
         proc = subprocess.run(
             cmd,
@@ -924,6 +1007,10 @@ def _run_scenario(
         result.error = str(e)
         return result
 
+    # Stop the edit watcher before we read the audit log for ordered evidence.
+    watch_stop.set()
+    watcher.join(timeout=2)
+
     # Estimate tokens (rough: ~4 chars per token)
     result.tokens = (len(prompt) + len(result.output)) // 4
 
@@ -937,6 +1024,7 @@ def _run_scenario(
         "pytest_successes": outcomes["successes"],
         "pytest_failures": outcomes["failures"],
         "pytest_after_edit": _pytest_after_edit(audit_log, project_dir),
+        "pytest_reproduce_fix_order": _pytest_reproduce_fix_order(audit_log, run_nonce),
         "protected_files_unchanged": protected_unchanged,
         "bootstrap_loaded": marker in result.output,
         "bootstrap_present": bootstrap_present,
@@ -1174,6 +1262,9 @@ if __name__ == "__main__":
     parser.add_argument("--candidate", help="Path to candidate SKILL.md")
     parser.add_argument("--scenario", help="Run only this scenario")
     parser.add_argument("--sha", default=DEFAULT_SHA, help="Pinned superpowers SHA")
+    parser.add_argument("--compare-baseline", action="store_true",
+                        help="OPT-IN real-harness run: also run the scenario WITHOUT the "
+                             "candidate skill and report the delta (needs an authenticated claude CLI)")
     parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
@@ -1190,6 +1281,16 @@ if __name__ == "__main__":
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if args.compare_baseline:
+        # Opt-in real-harness baseline-versus-skill run: measure the delta the
+        # candidate skill produces over running the same scenario without it.
+        try:
+            baseline = evaluate_skill(args.skill, None, scenario=args.scenario, pinned_sha=args.sha)
+        except (FileNotFoundError, ValueError, RuntimeError) as e:
+            print(f"Error (baseline): {e}", file=sys.stderr)
+            sys.exit(1)
+        results["_baseline"] = baseline
+
     # fail-closed - exit non-zero if any scenario has error
     has_errors = any(s.get("error") for s in results["scenarios"])
 
@@ -1203,6 +1304,12 @@ if __name__ == "__main__":
             status = "✓" if s["passed"] else "✗"
             err = f" [{s['error']}]" if s.get("error") else ""
             print(f"  {status} {s['id']}{err}")
+        if results.get("_baseline"):
+            bl = results["_baseline"]
+            delta = results["score"] - bl["score"]
+            print(f"\nBaseline (no candidate skill): {bl['score']:.2%} "
+                  f"({bl['passed']}/{bl['passed'] + bl['failed']})")
+            print(f"Candidate delta: {delta:+.2%}")
 
     if has_errors:
         sys.exit(1)
