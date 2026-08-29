@@ -223,6 +223,44 @@ def test_dual_backend_attempt_with_tools_sets_target_delta(monkeypatch):
     assert db.token_delta() > 0, "dual-backend tool replay did not set target delta"
 
 
+def test_record_cost_concurrent_no_lost_updates():
+    """Barrier-forced concurrent _record_cost calls must not lose updates."""
+    n = 30
+    barrier = threading.Barrier(n)
+
+    class _BarrierEcho(_EchoBackend):
+        def _cost_worker(self):
+            barrier.wait(timeout=15)
+            self._record_cost("hello", "world")
+
+    b = _BarrierEcho()
+    threads = [threading.Thread(target=b._cost_worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    per = len("hello") // 4 + len("world") // 4
+    assert b._tokens == per * n, f"concurrent _record_cost lost updates: {b._tokens} != {per * n}"
+
+
+def test_disabled_tool_replay_resets_call_delta():
+    """A prior call's delta must not leak through a disabled-tool-replay path."""
+    from types import SimpleNamespace
+
+    from skillopt_sleep.backend import OpenCodeCliBackend
+
+    b = OpenCodeCliBackend(model="", opencode_path="opencode", tool_replay=False)
+    # A prior call on this thread set a nonzero call-local delta.
+    b._record_cost("hello", "world")
+    assert b.token_delta() > 0  # stale from the prior call
+    # Disabled-tool-replay attempt_with_tools returns early; the delta must be
+    # reset to 0 so a reused worker does not report the previous call's cost.
+    task = SimpleNamespace(intent="intent", context_excerpt="ctx")
+    out, called = b.attempt_with_tools(task, skill="s", memory="m", tools=["search"])
+    assert out == "" and called == []
+    assert b.token_delta() == 0, "disabled-tool-replay leaked the prior call's delta"
+
+
 def test_cmd_harvest_redact_deep_is_key_aware():
     """_redact_deep must key-aware redact — `{"api_key": "x"}` used to leak."""
     from skillopt_sleep.__main__ import _redact_deep

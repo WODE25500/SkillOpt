@@ -360,6 +360,15 @@ class CliBackend(Backend):
         self._thread_local.delta = delta
         return delta
 
+    def _reset_call_delta(self) -> None:
+        """Zero the call-local delta for a NO-CALL path.
+
+        Called at the start of every tool-aware path (and used by cache hits) so
+        a reused worker never reports a previous call's token count — every
+        no-call / early-return path leaves the delta at 0.
+        """
+        self._thread_local.delta = 0
+
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         kind = key.split(":", 1)[0]
         ev = getattr(self, "evidence", None)
@@ -367,7 +376,7 @@ class CliBackend(Backend):
             cached = self._cache.get(key)
         if cached is not None:
             # cover: later cache hit must not report the previous call's delta.
-            self._thread_local.delta = 0
+            self._reset_call_delta()
             # cache hits log key-only (the full text is on the original miss event)
             if ev is not None:
                 ev.log("replay", "model_call", kind=kind, cache_hit=True, key=key,
@@ -865,6 +874,7 @@ class ClaudeCliBackend(CliBackend):
         return out
 
     def attempt_with_tools(self, task, skill, memory, tools):
+        self._reset_call_delta()
         # Expose a REAL, callable `search` tool (a shell shim that logs each
         # call) so the gbrain quick-answerer judge (tool_called=search) is
         # validated honestly: we detect the call from the shim's log, not from
@@ -1356,6 +1366,7 @@ class OpenCodeCliBackend(CliBackend):
         tools: List[str],
     ) -> Tuple[str, List[str]]:
         self.last_call_error = ""
+        self._reset_call_delta()
         if not self.tool_replay:
             self.last_call_error = (
                 "OpenCode CLI tool replay is not supported without explicit "
@@ -1616,6 +1627,7 @@ class CodexCliBackend(CliBackend):
         return out
 
     def attempt_with_tools(self, task, skill, memory, tools):
+        self._reset_call_delta()
         # Codex exec runs in a sandbox with shell access; expose the same real
         # `search` shim and let it run (workspace-write so the shim can log).
         import tempfile, shutil, stat
@@ -1880,6 +1892,7 @@ class CopilotCliBackend(CliBackend):
         return "\n".join(parts).strip()
 
     def attempt_with_tools(self, task, skill, memory, tools):
+        self._reset_call_delta()
         # Expose REAL, callable tool shims in the working directory so the
         # gbrain quick-answerer judge (tool_called=search) is validated
         # honestly: we detect each call from the shim's log, not from a
