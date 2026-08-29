@@ -344,6 +344,22 @@ class CliBackend(Backend):
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
         raise NotImplementedError
 
+    def _record_cost(self, prompt: str, response: str) -> int:
+        """THE single path to record an inference's token cost.
+
+        Computes the ``len//4`` delta, adds it to the aggregate ``_tokens``
+        (atomically under ``_lock``) and records it as the call-local
+        ``_thread_local.delta`` for ``replay_one()``. Every inference path
+        (``_cached_call``, ``attempt_with_tools``, ``reflect``) must route cost
+        here so the aggregate and call-local totals always agree and no path
+        under- or over-counts.
+        """
+        delta = len(prompt or "") // 4 + len(response or "") // 4
+        with self._lock:
+            self._tokens += delta
+        self._thread_local.delta = delta
+        return delta
+
     def _cached_call(self, key: str, prompt: str, *, max_tokens: int = 1024) -> str:
         kind = key.split(":", 1)[0]
         ev = getattr(self, "evidence", None)
@@ -362,13 +378,11 @@ class CliBackend(Backend):
         # over the same backend overlap; a concurrent miss may duplicate a call,
         # but _cache/_tokens reads+writes below are atomic.
         out = self._call(prompt, max_tokens=max_tokens)
-        delta = len(prompt) // 4 + len(out) // 4
+        # Charge every real call's tokens AND record it call-local in one place.
+        delta = self._record_cost(prompt, out)
         with self._lock:
-            # Charge every real call's tokens. A concurrent miss may duplicate a
-            # paid call; we count each real call rather than undercount. The cache
-            # dedup below may reuse another worker's success, but the model call
-            # above still consumed tokens.
-            self._tokens += delta
+            # The cache dedup below may reuse another worker's success, but the
+            # model call above still consumed tokens (already charged).
             existing = self._cache.get(key)
             if existing:
                 # A success was cached by another worker; prefer it (dedup) so an
@@ -378,10 +392,6 @@ class CliBackend(Backend):
                 # This worker succeeded and nothing is cached: cache it.
                 self._cache[key] = out
             # else: empty result + nothing cached -> don't cache (transient failure)
-        # Call-local accounting: record this call's delta on the calling thread
-        # so parallel replay_one() reads its own cost, not a before/after total
-        # that another worker inflates.
-        self._thread_local.delta = delta
         if ev is not None:
             ev.log("replay", "model_call", kind=kind, cache_hit=False, key=key,
                    phase=getattr(self, "evidence_phase", ""), backend=self.name,
@@ -556,7 +566,7 @@ class CliBackend(Backend):
                 "Reply with ONLY the JSON array, no prose, no markdown fences."
             )
             raw = self._call(p, max_tokens=1024)
-            self._tokens += len(p) // 4 + len(raw) // 4
+            self._record_cost(p, raw)
             if ev is not None:
                 ev.log("reflect", "exchange", target=target, attempt=attempt + 1,
                        backend=self.name, model=self.model,
@@ -913,11 +923,7 @@ class ClaudeCliBackend(CliBackend):
                     "Claude CLI could not be executed: %s", exc,
                 )
                 resp = ""
-            delta = len(prompt) // 4 + len(resp) // 4
-            self._tokens += delta
-            # Call-local accounting: replay_one() reads token_delta() after
-            # attempt_with_tools(), so record this call's cost on the thread.
-            self._thread_local.delta = delta
+            self._record_cost(prompt, resp)
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:
@@ -1417,14 +1423,14 @@ class OpenCodeCliBackend(CliBackend):
                     name for name, tool_id in project.tool_mapping.items() if tool_id in called
                 ]
         except OpenCodeError as exc:
+            # Prompt-only cost on the error path (no response text).
             delta = exc.prompt_chars // 4
-            self._tokens += delta
+            with self._lock:
+                self._tokens += delta
             self._thread_local.delta = delta
             self.last_call_error = str(exc)
             return "", []
-        delta = len(prompt) // 4 + len(text) // 4
-        self._tokens += delta
-        self._thread_local.delta = delta
+        self._record_cost(prompt, text)
         return text, called_tools
 
 
@@ -1702,9 +1708,7 @@ class CodexCliBackend(CliBackend):
                 self.last_call_error = (
                     f"codex exec (tools) exited {proc.returncode}: {(proc.stderr or '')[:500]}"
                 )
-            delta = len(prompt) // 4 + len(resp) // 4
-            self._tokens += delta
-            self._thread_local.delta = delta
+            self._record_cost(prompt, resp)
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:
@@ -1970,9 +1974,7 @@ class CopilotCliBackend(CliBackend):
                 resp = self._parse_jsonl_response(proc.stdout or "")
             except Exception:
                 resp = ""
-            delta = len(prompt) // 4 + len(resp) // 4
-            self._tokens += delta
-            self._thread_local.delta = delta
+            self._record_cost(prompt, resp)
             called: List[str] = []
             if os.path.exists(calllog):
                 with open(calllog) as f:
