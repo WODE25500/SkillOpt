@@ -344,21 +344,25 @@ class CliBackend(Backend):
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
         raise NotImplementedError
 
-    def _record_cost(self, prompt: str, response: str) -> int:
-        """THE single path to record an inference's token cost.
-
-        Computes the ``len//4`` delta, adds it to the aggregate ``_tokens``
-        (atomically under ``_lock``) and records it as the call-local
-        ``_thread_local.delta`` for ``replay_one()``. Every inference path
-        (``_cached_call``, ``attempt_with_tools``, ``reflect``) must route cost
-        here so the aggregate and call-local totals always agree and no path
-        under- or over-counts.
+    def _record_delta(self, delta: int) -> int:
+        """Add a computed delta to the aggregate ``_tokens`` AND record it
+        call-local. The one place both totals are updated, so they always agree.
         """
-        delta = len(prompt or "") // 4 + len(response or "") // 4
         with self._lock:
             self._tokens += delta
         self._thread_local.delta = delta
         return delta
+
+    def _record_cost(self, prompt: str, response: str) -> int:
+        """THE single path to record an inference's token cost (``len//4``).
+
+        Computes the ``len//4`` delta and delegates to ``_record_delta``. Every
+        inference path (``_cached_call``, ``attempt_with_tools``, ``reflect``)
+        must route cost here so the aggregate and call-local totals always agree
+        and no path under- or over-counts.
+        """
+        delta = len(prompt or "") // 4 + len(response or "") // 4
+        return self._record_delta(delta)
 
     def _reset_call_delta(self) -> None:
         """Zero the call-local delta for a NO-CALL path.
@@ -2473,7 +2477,10 @@ class AzureOpenAIBackend(CliBackend):
                 text = (resp.choices[0].message.content or "").strip()
                 try:
                     u = resp.usage
-                    self._tokens += (getattr(u, "prompt_tokens", 0) or 0) + (getattr(u, "completion_tokens", 0) or 0)
+                    self._record_delta(
+                        (getattr(u, "prompt_tokens", 0) or 0)
+                        + (getattr(u, "completion_tokens", 0) or 0)
+                    )
                 except Exception:
                     pass
                 if text:
@@ -2582,7 +2589,10 @@ class AzureResponsesBackend(AzureOpenAIBackend):
                 text = (getattr(resp, "output_text", "") or "").strip()
                 try:
                     u = resp.usage
-                    self._tokens += (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "output_tokens", 0) or 0)
+                    self._record_delta(
+                        (getattr(u, "input_tokens", 0) or 0)
+                        + (getattr(u, "output_tokens", 0) or 0)
+                    )
                 except Exception:
                     pass
                 if text:
