@@ -390,9 +390,16 @@ class CliBackend(Backend):
         # The model call is intentionally outside the lock so parallel workers
         # over the same backend overlap; a concurrent miss may duplicate a call,
         # but _cache/_tokens reads+writes below are atomic.
+        self._charged_in_call = False
         out = self._call(prompt, max_tokens=max_tokens)
-        # Charge every real call's tokens AND record it call-local in one place.
-        delta = self._record_cost(prompt, out)
+        # Charge every real call's tokens once, in one place. A backend that can
+        # report provider usage records it itself (accumulated, exact) and flips
+        # _charged_in_call so this path is a no-op — avoiding a double charge.
+        # Every other backend falls back to the len//4 length estimate here.
+        # Using a marker keeps _call's str return (which llm_miner/rollout/
+        # slow_update rely on) and preserves those paths' accounting.
+        if not self._charged_in_call:
+            self._record_cost(prompt, out)
         with self._lock:
             # The cache dedup below may reuse another worker's success, but the
             # model call above still consumed tokens (already charged).
@@ -578,8 +585,10 @@ class CliBackend(Backend):
                 prompt + "\n\nIMPORTANT: your previous reply was not valid JSON. "
                 "Reply with ONLY the JSON array, no prose, no markdown fences."
             )
+            self._charged_in_call = False
             raw = self._call(p, max_tokens=1024)
-            self._record_cost(p, raw)
+            if not self._charged_in_call:
+                self._record_cost(p, raw)
             if ev is not None:
                 ev.log("reflect", "exchange", target=target, attempt=attempt + 1,
                        backend=self.name, model=self.model,
@@ -1439,10 +1448,7 @@ class OpenCodeCliBackend(CliBackend):
                 ]
         except OpenCodeError as exc:
             # Prompt-only cost on the error path (no response text).
-            delta = exc.prompt_chars // 4
-            with self._lock:
-                self._tokens += delta
-            self._thread_local.delta = delta
+            delta = self._record_delta(exc.prompt_chars // 4)
             self.last_call_error = str(exc)
             return "", []
         self._record_cost(prompt, text)
@@ -2455,6 +2461,7 @@ class AzureOpenAIBackend(CliBackend):
         client = self._get_client()
         last_exc = None
         n_attempts = max(1, retries)
+        usage_total = 0
         for attempt in range(n_attempts):
             try:
                 kwargs: Dict[str, Any] = {
@@ -2477,16 +2484,15 @@ class AzureOpenAIBackend(CliBackend):
                 text = (resp.choices[0].message.content or "").strip()
                 try:
                     u = resp.usage
-                    self._record_delta(
-                        (getattr(u, "prompt_tokens", 0) or 0)
-                        + (getattr(u, "completion_tokens", 0) or 0)
-                    )
+                    usage_total += (getattr(u, "prompt_tokens", 0) or 0) + (getattr(u, "completion_tokens", 0) or 0)
                 except Exception:
                     pass
                 if text:
                     # A recovered retry must not leave a stale error behind:
                     # last_call_error always reflects the LATEST outcome.
                     self.last_call_error = ""
+                    self._record_delta(usage_total)
+                    self._charged_in_call = True
                     return text
                 # empty but no exception: model genuinely returned nothing — one
                 # quick retry can help (reasoning models occasionally yield empty)
@@ -2506,6 +2512,8 @@ class AzureOpenAIBackend(CliBackend):
             self.last_call_error = (
                 f"{self.deployment}: empty response on all {n_attempts} attempts"
             )
+            self._record_delta(usage_total)
+            self._charged_in_call = True
         return ""
 
 
@@ -2577,6 +2585,7 @@ class AzureResponsesBackend(AzureOpenAIBackend):
         last = None
         base_ep = self._next_endpoint()           # this call's primary endpoint
         base_idx = self.endpoints.index(base_ep)
+        usage_total = 0
         for attempt in range(max(1, retries)):
             # on retry, fail over to the other endpoint(s)
             ep = self.endpoints[(base_idx + attempt) % len(self.endpoints)]
@@ -2589,19 +2598,20 @@ class AzureResponsesBackend(AzureOpenAIBackend):
                 text = (getattr(resp, "output_text", "") or "").strip()
                 try:
                     u = resp.usage
-                    self._record_delta(
-                        (getattr(u, "input_tokens", 0) or 0)
-                        + (getattr(u, "output_tokens", 0) or 0)
-                    )
+                    usage_total += (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "output_tokens", 0) or 0)
                 except Exception:
                     pass
                 if text:
+                    self._record_delta(usage_total)
+                    self._charged_in_call = True
                     return text
                 last = "empty-response"
             except Exception as e:  # noqa: BLE001
                 last = e
             if attempt < retries - 1:
                 _t.sleep(min(8.0, (2 ** attempt) * 0.5) + _r.random() * 0.4)
+        self._record_delta(usage_total)
+        self._charged_in_call = True
         return ""
 
 
