@@ -339,6 +339,10 @@ class CliBackend(Backend):
         self._lock = threading.Lock()
         # Per-thread token delta for call-local accounting under parallel replay.
         self._thread_local = threading.local()
+        # Per-thread marker: set by a backend that self-reports provider usage so
+        # _cached_call/_reflect skip their length-estimate (no double charge).
+        # Thread-local so parallel workers can never read another worker's marker.
+        self._thread_local.charged_in_call = False
 
     # subclasses override --------------------------------------------------
     def _call(self, prompt: str, *, max_tokens: int = 1024) -> str:
@@ -390,15 +394,15 @@ class CliBackend(Backend):
         # The model call is intentionally outside the lock so parallel workers
         # over the same backend overlap; a concurrent miss may duplicate a call,
         # but _cache/_tokens reads+writes below are atomic.
-        self._charged_in_call = False
+        self._thread_local.charged_in_call = False
         out = self._call(prompt, max_tokens=max_tokens)
         # Charge every real call's tokens once, in one place. A backend that can
         # report provider usage records it itself (accumulated, exact) and flips
-        # _charged_in_call so this path is a no-op — avoiding a double charge.
-        # Every other backend falls back to the len//4 length estimate here.
+        # _thread_local.charged_in_call so this path is a no-op — avoiding a
+        # double charge. Every other backend falls back to the len//4 estimate here.
         # Using a marker keeps _call's str return (which llm_miner/rollout/
         # slow_update rely on) and preserves those paths' accounting.
-        if not self._charged_in_call:
+        if not self._thread_local.charged_in_call:
             self._record_cost(prompt, out)
         with self._lock:
             # The cache dedup below may reuse another worker's success, but the
@@ -585,9 +589,9 @@ class CliBackend(Backend):
                 prompt + "\n\nIMPORTANT: your previous reply was not valid JSON. "
                 "Reply with ONLY the JSON array, no prose, no markdown fences."
             )
-            self._charged_in_call = False
+            self._thread_local.charged_in_call = False
             raw = self._call(p, max_tokens=1024)
-            if not self._charged_in_call:
+            if not self._thread_local.charged_in_call:
                 self._record_cost(p, raw)
             if ev is not None:
                 ev.log("reflect", "exchange", target=target, attempt=attempt + 1,
@@ -2492,7 +2496,7 @@ class AzureOpenAIBackend(CliBackend):
                     # last_call_error always reflects the LATEST outcome.
                     self.last_call_error = ""
                     self._record_delta(usage_total)
-                    self._charged_in_call = True
+                    self._thread_local.charged_in_call = True
                     return text
                 # empty but no exception: model genuinely returned nothing — one
                 # quick retry can help (reasoning models occasionally yield empty)
@@ -2513,7 +2517,7 @@ class AzureOpenAIBackend(CliBackend):
                 f"{self.deployment}: empty response on all {n_attempts} attempts"
             )
             self._record_delta(usage_total)
-            self._charged_in_call = True
+            self._thread_local.charged_in_call = True
         return ""
 
 
@@ -2603,7 +2607,7 @@ class AzureResponsesBackend(AzureOpenAIBackend):
                     pass
                 if text:
                     self._record_delta(usage_total)
-                    self._charged_in_call = True
+                    self._thread_local.charged_in_call = True
                     return text
                 last = "empty-response"
             except Exception as e:  # noqa: BLE001
@@ -2611,7 +2615,7 @@ class AzureResponsesBackend(AzureOpenAIBackend):
             if attempt < retries - 1:
                 _t.sleep(min(8.0, (2 ** attempt) * 0.5) + _r.random() * 0.4)
         self._record_delta(usage_total)
-        self._charged_in_call = True
+        self._thread_local.charged_in_call = True
         return ""
 
 
