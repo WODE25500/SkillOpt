@@ -606,8 +606,13 @@ def build_ui():
                     rows = []
                     if not out_dir:
                         return rows
-                    base = PROJECT_ROOT / out_dir
-                    if not base.exists():
+                    base = (PROJECT_ROOT / out_dir).resolve()
+                    project_resolved = PROJECT_ROOT.resolve()
+                    try:
+                        base.relative_to(project_resolved)
+                    except ValueError:
+                        return rows
+                    if not base.exists() or not base.is_dir():
                         return rows
                     for bench_dir in sorted(base.iterdir()):
                         if not bench_dir.is_dir():
@@ -668,6 +673,10 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1",
                         help="Server host. Default is localhost; use 0.0.0.0 "
                              "to expose publicly (no auth, use with care).")
+    parser.add_argument("--auth-user", type=str, default=None,
+                        help="Username for basic auth (or set SKILLOPT_WEBUI_USER).")
+    parser.add_argument("--auth-pass", type=str, default=None,
+                        help="Password for basic auth (or set SKILLOPT_WEBUI_PASS).")
     args = parser.parse_args()
 
     if args.host and args.host not in ("127.0.0.1", "localhost", "::1"):
@@ -679,8 +688,26 @@ def main():
             file=sys.stderr,
         )
 
+    if args.share:
+        print(
+            "⚠ warning: --share creates a public tunnel (gradio.live) with no "
+            "authentication by default. Anyone with the URL can start/stop "
+            "training and browse the filesystem via Output Explorer. "
+            "Use --auth-user / --auth-pass (or SKILLOPT_WEBUI_USER / "
+            "SKILLOPT_WEBUI_PASS) to require login.",
+            file=sys.stderr,
+        )
+
+    auth_user = args.auth_user or os.environ.get("SKILLOPT_WEBUI_USER")
+    auth_pass = args.auth_pass or os.environ.get("SKILLOPT_WEBUI_PASS")
+    auth = None
+    if auth_user and auth_pass:
+        auth = (auth_user, auth_pass)
+
     app = build_ui()
     launch_kwargs = build_launch_kwargs(args.host, args.port, args.share)
+    if auth:
+        launch_kwargs["auth"] = auth
     app.launch(**launch_kwargs)
 
 

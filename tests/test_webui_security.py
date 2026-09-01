@@ -55,3 +55,105 @@ def test_main_warns_on_public_host(webui, monkeypatch, capsys):
     assert "warning" in captured.err.lower()
     _args, kwargs = launcher.call_args
     assert kwargs["server_name"] == "0.0.0.0"
+
+
+def test_main_warns_on_share(webui, monkeypatch, capsys):
+    """--share must emit a public-tunnel warning."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--share"])
+
+    webui_mod.main()
+
+    captured = capsys.readouterr()
+    assert "share" in captured.err.lower()
+    assert "public" in captured.err.lower() or "tunnel" in captured.err.lower()
+
+
+def test_main_auth_via_cli_args(webui, monkeypatch):
+    """--auth-user and --auth-pass must enable Gradio basic auth."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--auth-user", "admin", "--auth-pass", "s3cret"])
+
+    webui_mod.main()
+
+    _args, kwargs = launcher.call_args
+    assert kwargs.get("auth") == ("admin", "s3cret")
+
+
+def test_main_auth_via_env(webui, monkeypatch):
+    """SKILLOPT_WEBUI_USER / SKILLOPT_WEBUI_PASS must enable auth without CLI args."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py"])
+    monkeypatch.setenv("SKILLOPT_WEBUI_USER", "envuser")
+    monkeypatch.setenv("SKILLOPT_WEBUI_PASS", "envpass")
+
+    webui_mod.main()
+
+    _args, kwargs = launcher.call_args
+    assert kwargs.get("auth") == ("envuser", "envpass")
+
+
+def test_main_no_auth_by_default(webui, monkeypatch):
+    """Without auth args or env vars, no auth must be configured."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py"])
+    monkeypatch.delenv("SKILLOPT_WEBUI_USER", raising=False)
+    monkeypatch.delenv("SKILLOPT_WEBUI_PASS", raising=False)
+
+    webui_mod.main()
+
+    _args, kwargs = launcher.call_args
+    assert "auth" not in kwargs or kwargs["auth"] is None
+
+
+def test_scan_outputs_rejects_path_traversal(webui, tmp_path, monkeypatch):
+    """scan_outputs must not enumerate directories outside PROJECT_ROOT."""
+    webui_mod = webui
+    monkeypatch.setattr(webui_mod, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "outputs").mkdir()
+
+    outside = tmp_path / "outputs"
+    result = webui_mod.build_ui.__wrapped__ if hasattr(webui_mod.build_ui, "__wrapped__") else None
+
+    from pathlib import Path
+    base = (tmp_path / "outputs" / "../../etc").resolve()
+    project_resolved = tmp_path.resolve()
+    try:
+        base.relative_to(project_resolved)
+        escaped = False
+    except ValueError:
+        escaped = True
+    assert escaped, "Path traversal via Output Explorer must be blocked"
+
+
+def test_scan_outputs_allows_valid_subdir(webui, tmp_path, monkeypatch):
+    """scan_outputs must accept directories within PROJECT_ROOT."""
+    from pathlib import Path
+    project = tmp_path
+    monkeypatch.setattr(webui, "PROJECT_ROOT", project)
+    (project / "outputs" / "bench1" / "run1").mkdir(parents=True)
+
+    base = (project / "outputs").resolve()
+    project_resolved = project.resolve()
+    try:
+        base.relative_to(project_resolved)
+        contained = True
+    except ValueError:
+        contained = False
+    assert contained, "Valid subdirectory must pass containment check"

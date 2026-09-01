@@ -38,10 +38,12 @@ dependencies = [
 alfworld = ["alfworld>=0.4.0", "gymnasium>=0.29.0"]
 # Claude model backend
 claude = ["claude-agent-sdk>=0.1.0", "json_repair>=0.61.0"]
+# Codex model backend (via OpenAI Codex SDK)
+codex = ["openai-codex-sdk>=0.1.0"]
 # Qwen local model backend (via vLLM)
-qwen = ["vllm>=0.4.0", "json_repair>=0.61.0"]
+qwen = ["vllm>=0.8.4", "json_repair>=0.61.0"]
 # SearchQA data materialization
-searchqa = ["datasets>=2.18.0"]
+searchqa = ["datasets>=3.0"]
 # Documentation site
 docs = ["mkdocs-material>=9.5.0", "mkdocstrings[python]>=0.24.0"]
 # WebUI dashboard
