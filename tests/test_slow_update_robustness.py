@@ -18,31 +18,33 @@ from skillopt.optimizer.slow_update import (
 )
 
 
-def test_is_result_success_handles_diverse_metrics() -> None:
-    # Explicit hard boolean / float
+def test_is_result_success_strict_contract() -> None:
+    # Explicit hard boolean / float (Valid)
     assert _is_result_success({"hard": 1}) is True
     assert _is_result_success({"hard": 0}) is False
-    assert _is_result_success({"hard": 1.0}) is True
-    assert _is_result_success({"hard": "true"}) is True
+    assert _is_result_success({"hard": True}) is True
+    assert _is_result_success({"hard": False}) is False
+    assert _is_result_success({"hard": 0.8}) is True
+    assert _is_result_success({"hard": 0.2}) is False
 
-    # General score metric
-    assert _is_result_success({"score": 1.0}) is True
-    assert _is_result_success({"score": 0.0}) is False
-    assert _is_result_success({"score": 0.8}) is True
-    assert _is_result_success({"score": 0.2}) is False
+    # Fail closed for strings
+    assert _is_result_success({"hard": "true"}) is False
+    assert _is_result_success({"hard": "1"}) is False
+    assert _is_result_success({"hard": "false"}) is False
 
-    # Exact match metric
-    assert _is_result_success({"exact_match": 1}) is True
-    assert _is_result_success({"exact_match": 0}) is False
+    # Fail closed for None and non-finite
+    assert _is_result_success({"hard": None}) is False
+    assert _is_result_success({"hard": float("nan")}) is False
+    assert _is_result_success({"hard": float("inf")}) is False
 
-    # Soft metric threshold
-    assert _is_result_success({"soft": 1.0}) is True
-    assert _is_result_success({"soft": 0.5}) is False
+    # Fail closed for out of range
+    assert _is_result_success({"hard": -1}) is False
+    assert _is_result_success({"hard": 2}) is False
 
-    # Empty or invalid inputs
+    # Fail closed for other metric shapes (adapters must normalize)
+    assert _is_result_success({"score": 1}) is False
+    assert _is_result_success({"exact_match": 1}) is False
     assert _is_result_success({}) is False
-    assert _is_result_success(None) is False
-    assert _is_result_success("not-a-dict") is False
 
 
 def test_build_comparison_pairs_categorization() -> None:
@@ -58,16 +60,16 @@ def test_build_comparison_pairs_categorization() -> None:
     # task-3: persistent_fail (fail -> fail)
     # task-4: stable_success (pass -> pass)
     results_prev = [
-        {"id": "task-1", "score": 0.0, "predicted_answer": "wrong1"},
-        {"id": "task-2", "exact_match": 1.0, "predicted_answer": "correct2"},
-        {"id": "task-3", "hard": 0, "fail_reason": "timeout"},
-        {"id": "task-4", "hard": 1, "predicted_answer": "correct4"},
+        {"id": "task-1", "hard": 0.0, "soft": 0.1, "predicted_answer": "wrong1"},
+        {"id": "task-2", "hard": 1.0, "soft": 0.9, "predicted_answer": "correct2"},
+        {"id": "task-3", "hard": 0, "soft": 0.0, "fail_reason": "timeout"},
+        {"id": "task-4", "hard": 1, "soft": 1.0, "predicted_answer": "correct4"},
     ]
     results_curr = [
-        {"id": "task-1", "score": 1.0, "predicted_answer": "correct1"},
-        {"id": "task-2", "exact_match": 0.0, "predicted_answer": "wrong2"},
-        {"id": "task-3", "hard": 0, "fail_reason": "wrong_syntax"},
-        {"id": "task-4", "hard": 1, "predicted_answer": "correct4"},
+        {"id": "task-1", "hard": 1.0, "soft": 0.95, "predicted_answer": "correct1"},
+        {"id": "task-2", "hard": 0.0, "soft": 0.2, "predicted_answer": "wrong2"},
+        {"id": "task-3", "hard": 0, "soft": 0.05, "fail_reason": "wrong_syntax"},
+        {"id": "task-4", "hard": 1, "soft": 1.0, "predicted_answer": "correct4"},
     ]
 
     pairs = build_comparison_pairs(results_prev, results_curr, items)
