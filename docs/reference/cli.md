@@ -115,6 +115,30 @@ disabled. Read-only Ask-mode rollouts may explicitly disable it. Override the
 executable or sandbox through `model.cursor_exec_path` and
 `model.cursor_exec_sandbox`.
 
+To train or evaluate with the Claude Code CLI execution harness (`claude_code_exec`):
+
+```bash
+# Target-only rollout through Claude Code (optimizer defaults to configured chat backend):
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --backend claude_code_exec
+
+# Explicitly drive both target and optimizer roles with Claude Code:
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --cfg-options \
+    model.optimizer_backend=claude_code_exec \
+    model.target_backend=claude_code_exec
+```
+
+When `claude_code_exec` is selected as the target backend, SkillOpt streams SDK
+messages from the Claude Code process and parses text, tool calls, and tool
+results into structured trace steps (`claude_trace_steps.txt`). When
+`model.claude_trace_to_optimizer` is enabled (`true` by default), these trace
+steps are injected into the reflection prompt so the optimizer can inspect the
+agent's intermediate actions.
+
+
 ## SkillOpt-Sleep
 
 ```bash
