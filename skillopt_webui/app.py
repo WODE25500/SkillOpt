@@ -700,9 +700,18 @@ def main():
 
     auth_user = args.auth_user or os.environ.get("SKILLOPT_WEBUI_USER")
     auth_pass = args.auth_pass or os.environ.get("SKILLOPT_WEBUI_PASS")
-    auth = None
-    if auth_user and auth_pass:
-        auth = (auth_user, auth_pass)
+    # Fail-closed: authentication requires BOTH credentials. Supplying only a
+    # username or only a password must not silently launch the UI unauthenticated
+    # (a deployment could expose the training controls without login).
+    if bool(auth_user) != bool(auth_pass):
+        print(
+            "SKILLOPT_WEBUI authentication requires BOTH --auth-user and "
+            "--auth-pass (or SKILLOPT_WEBUI_USER and SKILLOPT_WEBUI_PASS). "
+            "Refusing to start with incomplete credentials.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    auth = (auth_user, auth_pass) if auth_user else None
 
     app = build_ui()
     launch_kwargs = build_launch_kwargs(args.host, args.port, args.share)

@@ -157,3 +157,59 @@ def test_scan_outputs_allows_valid_subdir(webui, tmp_path, monkeypatch):
     except ValueError:
         contained = False
     assert contained, "Valid subdirectory must pass containment check"
+
+
+def test_main_rejects_incomplete_cli_auth_user_only(webui, monkeypatch):
+    """--auth-user without --auth-pass must fail closed (never launch)."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--host", "0.0.0.0", "--auth-user", "admin"])
+    with pytest.raises(SystemExit):
+        webui_mod.main()
+    launcher.assert_not_called()
+
+
+def test_main_rejects_incomplete_cli_auth_pass_only(webui, monkeypatch):
+    """--auth-pass without --auth-user must fail closed (never launch)."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--host", "0.0.0.0", "--auth-pass", "s3cret"])
+    with pytest.raises(SystemExit):
+        webui_mod.main()
+    launcher.assert_not_called()
+
+
+def test_main_rejects_incomplete_env_auth_user_only(webui, monkeypatch):
+    """Only SKILLOPT_WEBUI_USER set must fail closed (never launch)."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--host", "0.0.0.0"])
+    monkeypatch.setenv("SKILLOPT_WEBUI_USER", "envuser")
+    monkeypatch.delenv("SKILLOPT_WEBUI_PASS", raising=False)
+    with pytest.raises(SystemExit):
+        webui_mod.main()
+    launcher.assert_not_called()
+
+
+def test_main_rejects_incomplete_env_auth_pass_only(webui, monkeypatch):
+    """Only SKILLOPT_WEBUI_PASS set must fail closed (never launch)."""
+    webui_mod = webui
+    launcher = mock.MagicMock()
+    app_mock = mock.MagicMock()
+    app_mock.launch = launcher
+    monkeypatch.setattr(webui_mod, "build_ui", lambda: app_mock)
+    monkeypatch.setattr(sys, "argv", ["app.py", "--host", "0.0.0.0"])
+    monkeypatch.setenv("SKILLOPT_WEBUI_PASS", "envpass")
+    monkeypatch.delenv("SKILLOPT_WEBUI_USER", raising=False)
+    with pytest.raises(SystemExit):
+        webui_mod.main()
+    launcher.assert_not_called()
