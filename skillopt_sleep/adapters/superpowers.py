@@ -623,8 +623,16 @@ def _watch_edits(
                     mt = p.stat().st_mtime_ns
                 except OSError:
                     continue
-                if mt != last.get(str(p), mt):
-                    last[str(p)] = mt
+                key = str(p)
+                prev = last.get(key)
+                if prev is None:
+                    # First sight: cache the baseline (setup files, and any new
+                    # source created after the run started) so future scans have a
+                    # previous mtime to compare against. Not logged.
+                    last[key] = mt
+                elif mt != prev:
+                    # Changed since the last scan: log the edit, update the baseline.
+                    last[key] = mt
                     with open(audit_log, "a", encoding="utf-8") as fh:
                         fh.write(f"{nonce} edit {p.name} {mt}\n")
                         fh.flush()
@@ -1006,10 +1014,12 @@ def _run_scenario(
     except Exception as e:
         result.error = str(e)
         return result
-
-    # Stop the edit watcher before we read the audit log for ordered evidence.
-    watch_stop.set()
-    watcher.join(timeout=2)
+    finally:
+        # Always stop the edit watcher before we read the audit log for ordered
+        # evidence. The non-zero-exit / timeout / exception returns above also pass
+        # through here, so a daemon polling thread is never left behind.
+        watch_stop.set()
+        watcher.join(timeout=2)
 
     # Estimate tokens (rough: ~4 chars per token)
     result.tokens = (len(prompt) + len(result.output)) // 4

@@ -133,3 +133,46 @@ def test_fix_source_not_test_gamed_judge():
     # Test was modified to fake a pass -> must fail closed.
     bad = {"harness_test_passes": True, "protected_files_unchanged": False}
     assert not all(_score_check(c, "", evidence=bad) for c in scenario["judge"]["checks"])
+
+
+def test_watch_edits_logs_real_mtime_change(tmp_path):
+    """The production event producer must log an edit when a source file's mtime
+    changes (regression: an unseen path compared mt != mt and was never baselined,
+    so the watcher never recorded any edit and the judge always failed closed)."""
+    import os
+    import threading
+    import time
+
+    from skillopt_sleep.adapters.superpowers import _watch_edits
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    src = project / "math_ops.py"
+    src.write_text("x = 1\n", encoding="utf-8")
+
+    audit = tmp_path / "audit.log"
+    nonce = "watcherabc"
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=_watch_edits, args=(audit, project, nonce, stop, 0.02), daemon=True
+    )
+    thread.start()
+    try:
+        # Let the watcher run its first (baseline) scan, then change the mtime.
+        time.sleep(0.1)
+        src.write_text("x = 2\n", encoding="utf-8")
+        os.utime(src, ns=(1, 10_000_000_000))  # a clearly-different mtime
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if audit.exists() and f"{nonce} edit math_ops.py" in audit.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.05)
+
+        content = audit.read_text(encoding="utf-8") if audit.exists() else ""
+        assert f"{nonce} edit math_ops.py" in content, (
+            f"watcher did not log the edit after an mtime change: {content!r}"
+        )
+    finally:
+        stop.set()
+        thread.join(timeout=2)
