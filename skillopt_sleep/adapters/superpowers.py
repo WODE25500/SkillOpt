@@ -531,7 +531,7 @@ def _score_check(
     return False
 
 
-def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str) -> None:
+def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str, project_dir: Path) -> None:
     """Install `pytest`/`python` shims that log real invocations, tagged with a
     per-run nonce the parent generated.
 
@@ -553,6 +553,7 @@ def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str) -> None:
         f"audit_log={shlex.quote(str(audit_log))}; "
         f"audit_dir={shlex.quote(str(audit_log.parent))}; "
         f"real_python={shlex.quote(real_python)}; "
+        f"project_dir={shlex.quote(str(project_dir))}; "
     )
 
     def _install(name: str, body: str) -> None:
@@ -564,9 +565,14 @@ def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str) -> None:
     rec = (
         f'count=$(grep -c "^{nonce} run " "$audit_log" 2>/dev/null || true); '
         'n=$(( ${count:-0} + 1 )); '
+        # Snapshot the source state at THIS test boundary, before running, so the
+        # judge ties edit evidence to a real test boundary instead of the watcher's
+        # polling order. Uses the same snippet as _source_fingerprint (run-start/end).
+        f'snap_hash=$("$real_python" -c {shlex.quote(_FINGERPRINT_SNIPPET)} "$project_dir"); '
+        f'printf "{nonce} run %s: %s\\n" "$n" "$*" >> "$audit_log"; '
+        f'printf "{nonce} snap %s\\n" "$snap_hash" >> "$audit_log"; '
         f'report="$audit_dir/pytest-{nonce}-$n.xml"; '
         f'report_local=".skillopt-pytest-{nonce}-$n-$$.xml"; '
-        f'printf "{nonce} run %s: %s\\n" "$n" "$*" >> "$audit_log"; '
         'export SKILLOPT_ATTEMPT="$n"; '
         f'export PYTHONPYCACHEPREFIX="$audit_dir/pycache-{nonce}-$n"; '
     )
@@ -642,36 +648,75 @@ def _watch_edits(
 
 
 def _pytest_reproduce_fix_order(audit_log: Path, nonce: str) -> bool:
-    """True iff a FAILING pytest run precedes the first source edit AND a PASSING
-    pytest run follows the last edit (reproduce-before-fix, verify-after-fix).
+    """True iff a failing pytest run on the ORIGINAL source is followed by a
+    passing run on an edited source, and the final on-disk source equals that
+    last verified state (reproduce-before-fix, verify-after-fix).
 
-    Reads the ordered event sequence from the audit log (edit lines from the
-    watcher + run/result lines from the pytest shim). Fails closed if there is no
-    recorded edit, or the failing/passing runs are not in the required order.
-    This replaces the old ``_pytest_after_edit`` mtime comparison, which could
-    not distinguish an edit→fail→edit→pass sequence from a true fail→fix→verify.
+    Edit evidence is tied to synchronous source snapshots at each test boundary
+    (``snap <hash>``), plus a ``start``/``end`` baseline and final reconciliation.
+    This deliberately ignores the watcher's polling ``edit`` lines, whose
+    append-order can coalesce or omit edits across a scan interval and so cannot
+    establish the invariant. Fails closed when the required order, a fail/pass
+    pair, or the final reconciliation cannot be established.
     """
     try:
         lines = audit_log.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return False
-    edit_re = re.compile(rf"^{re.escape(nonce)} edit \S+ \d+$")
+    start_re = re.compile(rf"^{re.escape(nonce)} start ([a-f0-9]+)$")
+    end_re = re.compile(rf"^{re.escape(nonce)} end ([a-f0-9]+)$")
+    snap_re = re.compile(rf"^{re.escape(nonce)} snap ([a-f0-9]+)$")
     result_re = re.compile(rf"^{re.escape(nonce)} result \d+: (-?\d+)$")
-    events: List[str] = []
+
+    start_hash = end_hash = None
+    pending_snap = None
+    calls: List[tuple] = []  # (snapshot_hash, outcome) per pytest invocation
     for line in lines:
-        if edit_re.match(line):
-            events.append("edit")
+        m = start_re.match(line)
+        if m:
+            start_hash = m.group(1)
+            continue
+        m = end_re.match(line)
+        if m:
+            end_hash = m.group(1)
+            continue
+        m = snap_re.match(line)
+        if m:
+            pending_snap = m.group(1)
             continue
         m = result_re.match(line)
         if m:
-            events.append("fail" if int(m.group(1)) != 0 else "pass")
-    edit_idx = [i for i, e in enumerate(events) if e == "edit"]
-    if not edit_idx:
+            calls.append((pending_snap, "pass" if int(m.group(1)) == 0 else "fail"))
+            pending_snap = None
+
+    if start_hash is None or end_hash is None or not calls:
         return False
-    first_edit, last_edit = edit_idx[0], edit_idx[-1]
-    fail_before = any(i < first_edit for i, e in enumerate(events) if e == "fail")
-    pass_after = any(i > last_edit for i, e in enumerate(events) if e == "pass")
-    return fail_before and pass_after
+
+    first_fail = next(
+        (i for i, (snap, out) in enumerate(calls) if out == "fail"), None
+    )
+    if first_fail is None:
+        return False
+    if calls[first_fail][0] != start_hash:
+        # The failing run was NOT on the original source: source was edited
+        # before reproduction, so reproduce-before-fix is violated.
+        return False
+
+    # A passing run after the fail, on a source different from the reproduce one.
+    verify = [
+        (snap, i)
+        for i, (snap, out) in enumerate(calls)
+        if i > first_fail and out == "pass" and snap != calls[first_fail][0]
+    ]
+    if not verify:
+        return False
+    last_verified_snap = verify[-1][0]
+
+    # Final reconciliation: the last verified source must be the on-disk end
+    # state, i.e. no source edit was made after the final verification.
+    if last_verified_snap != end_hash:
+        return False
+    return True
 
 
 def _pytest_after_edit(audit_log: Path, project_dir: Path) -> bool:
@@ -815,6 +860,44 @@ def _protected_files_unchanged(project_dir: Path, snapshot: Dict[str, str]) -> b
     return True
 
 
+# Content fingerprint of a project's ``*.py`` sources. The pytest shim and the
+# harness both run this exact snippet so the ``snap``/``start``/``end`` lines
+# record the same authoritative source state, instead of relying on a polling
+# watcher whose append-order can coalesce or omit edits. ``sys.argv[1]`` is the
+# project dir to scan (so the shim measures the same tree regardless of cwd).
+_FINGERPRINT_SNIPPET = (
+    "import glob, hashlib, os, sys\n"
+    "os.chdir(sys.argv[1])\n"
+    "h = hashlib.sha256()\n"
+    "for p in sorted(glob.glob('**/*.py', recursive=True)):\n"
+    "    try:\n"
+    "        d = open(p, 'rb').read()\n"
+    "    except OSError:\n"
+    "        d = b''\n"
+    "    h.update(d); h.update(b'\\0')\n"
+    "print(h.hexdigest())\n"
+)
+
+
+def _source_fingerprint(project_dir: Path) -> str:
+    """Stable content hash of ``project_dir``'s ``*.py`` sources.
+
+    Runs the exact snippet the pytest shim uses, so the run-start / run-end
+    snapshots are directly comparable to the ``snap`` lines the shim records.
+    Returns ``""`` if the fingerprint cannot be computed (fail closed upstream).
+    """
+    try:
+        out = subprocess.run(
+            [sys.executable, "-c", _FINGERPRINT_SNIPPET, str(project_dir)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if out.returncode != 0:
+        return ""
+    return out.stdout.strip()
+
+
 def _run_scenario(
     scenario: Dict[str, Any],
     superpowers_dir: Path,
@@ -854,7 +937,7 @@ def _run_scenario(
     audit_log = scenario_home / ".skillopt" / "pytest.log"
     bin_dir = scenario_home / ".skillopt" / "bin"
     run_nonce = os.urandom(8).hex()
-    _write_pytest_shims(bin_dir, audit_log, run_nonce)
+    _write_pytest_shims(bin_dir, audit_log, run_nonce, project_dir)
 
     # Write setup files
     for filename, content in scenario.get("setup", {}).get("files", {}).items():
@@ -862,6 +945,14 @@ def _run_scenario(
     protected_snapshot = _snapshot_protected_files(
         project_dir, list(scenario.get("protected_files", []))
     )
+
+    # Baseline the source state BEFORE the agent runs. The order judge compares the
+    # first failing test's snapshot against this to prove reproduce-before-fix (a
+    # fail whose source already differs from the baseline means the source was
+    # edited before reproduction).
+    start_snap = _source_fingerprint(project_dir)
+    with open(audit_log, "a", encoding="utf-8") as fh:
+        fh.write(f"{run_nonce} start {start_snap}\n")
 
     # skill_name becomes a path segment - reject traversal/separators up front
     if skill_name in ("", ".", "..") or "/" in skill_name or "\\" in skill_name:
@@ -1020,6 +1111,14 @@ def _run_scenario(
         # through here, so a daemon polling thread is never left behind.
         watch_stop.set()
         watcher.join(timeout=2)
+
+    # Reconcile the FINAL source state after the agent exits. The order judge
+    # requires the last verified snapshot to equal this, so a source edit made
+    # after the final passing test (or after the watcher stopped polling) is
+    # still caught instead of silently accepted.
+    end_snap = _source_fingerprint(project_dir)
+    with open(audit_log, "a", encoding="utf-8") as fh:
+        fh.write(f"{run_nonce} end {end_snap}\n")
 
     # Estimate tokens (rough: ~4 chars per token)
     result.tokens = (len(prompt) + len(result.output)) // 4

@@ -274,7 +274,7 @@ class TestHarnessEvidence:
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
             bin_dir, log = ws / "bin", ws / "pytest.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             (ws / "test_ok.py").write_text("def test_ok():\n    assert True\n")
 
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
@@ -294,7 +294,7 @@ class TestHarnessEvidence:
             ws = Path(tmpdir) / "space $HOME"
             ws.mkdir()
             bin_dir, log = ws / "shim bin", ws / "pytest $audit.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             (ws / "test_ok.py").write_text("def test_ok():\n    assert True\n")
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
 
@@ -308,7 +308,7 @@ class TestHarnessEvidence:
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
             bin_dir, log = ws / "bin", ws / "pytest.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             (ws / "test_ok.py").write_text("def test_ok():\n    assert True\n")
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
 
@@ -331,7 +331,7 @@ class TestHarnessEvidence:
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
             bin_dir, log = ws / "bin", ws / "pytest.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
 
             version = subprocess.run(
@@ -371,7 +371,7 @@ class TestHarnessEvidence:
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
             bin_dir, log = ws / "bin", ws / "pytest.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             flaky = next(s for s in VERIFICATION_SCENARIOS if s["id"] == "flaky-verify-rerun")
             (ws / "test_flaky.py").write_text(flaky["setup"]["files"]["test_flaky.py"])
 
@@ -436,7 +436,7 @@ class TestHarnessEvidence:
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
             bin_dir, log = ws / "bin", ws / "pytest.log"
-            _write_pytest_shims(bin_dir, log, "abc123")
+            _write_pytest_shims(bin_dir, log, "abc123", ws)
             source = ws / "math_ops.py"
             source.write_text("def add(a, b):\n    return a + b\n")
             (ws / "test_math.py").write_text(
