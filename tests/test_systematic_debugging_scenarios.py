@@ -145,6 +145,32 @@ def test_adversarial_final_edit_without_verify_rejected(tmp_path):
     assert _pytest_reproduce_fix_order(log, nonce) is False
 
 
+def test_aux_file_added_before_reproduce_accepted(tmp_path):
+    # Regression: creating a NEW auxiliary .py before the failing run must NOT be
+    # treated as editing the source-under-test. The fingerprint is scoped to the
+    # scenario's source files (setup minus protected), so an unrelated file is
+    # invisible while editing the real source still flips the hash.
+    nonce = "abc123"
+    project = tmp_path / "proj"; project.mkdir()
+    names = ["math_ops.py"]
+    (project / "math_ops.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    s0 = _source_fingerprint(project, names)
+    # A new aux file must not change the scoped fingerprint.
+    (project / "debug_helper.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    assert _source_fingerprint(project, names) == s0, "aux .py must be invisible to the scoped fingerprint"
+    # Editing the real source still changes the hash.
+    (project / "math_ops.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    s1 = _source_fingerprint(project, names)
+    assert s1 != s0
+    log = _audit(nonce, [
+        f"{nonce} start {s0}",
+        f"{nonce} snap {s0}", f"{nonce} result 1: 1",   # fail on unchanged source
+        f"{nonce} snap {s1}", f"{nonce} result 2: 0",   # pass after fix
+        f"{nonce} end {s1}",
+    ], tmp_path)
+    assert _pytest_reproduce_fix_order(log, nonce) is True
+
+
 def test_pass_before_fail_rejected(tmp_path):
     # A passing run with no preceding failing run cannot be a fix.
     nonce = "abc123"

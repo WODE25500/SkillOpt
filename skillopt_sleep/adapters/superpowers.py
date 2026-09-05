@@ -531,7 +531,10 @@ def _score_check(
     return False
 
 
-def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str, project_dir: Path) -> None:
+def _write_pytest_shims(
+    bin_dir: Path, audit_log: Path, nonce: str, project_dir: Path,
+    source_names: Optional[List[str]] = None,
+) -> None:
     """Install `pytest`/`python` shims that log real invocations, tagged with a
     per-run nonce the parent generated.
 
@@ -562,13 +565,15 @@ def _write_pytest_shims(bin_dir: Path, audit_log: Path, nonce: str, project_dir:
         path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     # attempt number = (nonce-tagged start lines so far) + 1, stamped for flaky tests
+    source_args = " ".join(shlex.quote(n) for n in (source_names or []))
     rec = (
         f'count=$(grep -c "^{nonce} run " "$audit_log" 2>/dev/null || true); '
         'n=$(( ${count:-0} + 1 )); '
         # Snapshot the source state at THIS test boundary, before running, so the
         # judge ties edit evidence to a real test boundary instead of the watcher's
-        # polling order. Uses the same snippet as _source_fingerprint (run-start/end).
-        f'snap_hash=$("$real_python" -c {shlex.quote(_FINGERPRINT_SNIPPET)} "$project_dir"); '
+        # polling order. Uses the same snippet as _source_fingerprint (run-start/end),
+        # scoped to the same source files so the hashes are comparable.
+        f'snap_hash=$("$real_python" -c {shlex.quote(_FINGERPRINT_SNIPPET)} "$project_dir" {source_args}); '
         f'printf "{nonce} run %s: %s\\n" "$n" "$*" >> "$audit_log"; '
         f'printf "{nonce} snap %s\\n" "$snap_hash" >> "$audit_log"; '
         f'report="$audit_dir/pytest-{nonce}-$n.xml"; '
@@ -860,18 +865,24 @@ def _protected_files_unchanged(project_dir: Path, snapshot: Dict[str, str]) -> b
     return True
 
 
-# Content fingerprint of a project's ``*.py`` sources. The pytest shim and the
+# Content fingerprint of the project's *.py sources. The pytest shim and the
 # harness both run this exact snippet so the ``snap``/``start``/``end`` lines
 # record the same authoritative source state, instead of relying on a polling
-# watcher whose append-order can coalesce or omit edits. ``sys.argv[1]`` is the
-# project dir to scan (so the shim measures the same tree regardless of cwd).
+# watcher whose append-order can coalesce or omit edits. ``argv[1]`` is the
+# project dir to scan; ``argv[2:]`` are the source filenames to hash. When no
+# names are given it falls back to every ``**/*.py`` under the dir, so the
+# fingerprint can be scoped to the scenario's source files (excluding added
+# aux files) while staying backward-compatible for callers that pass none.
 _FINGERPRINT_SNIPPET = (
     "import glob, hashlib, os, sys\n"
     "os.chdir(sys.argv[1])\n"
+    "names = sys.argv[2:]\n"
+    "if not names:\n"
+    "    names = sorted(glob.glob('**/*.py', recursive=True))\n"
     "h = hashlib.sha256()\n"
-    "for p in sorted(glob.glob('**/*.py', recursive=True)):\n"
+    "for n in sorted(names):\n"
     "    try:\n"
-    "        d = open(p, 'rb').read()\n"
+    "        d = open(n, 'rb').read()\n"
     "    except OSError:\n"
     "        d = b''\n"
     "    h.update(d); h.update(b'\\0')\n"
@@ -879,17 +890,24 @@ _FINGERPRINT_SNIPPET = (
 )
 
 
-def _source_fingerprint(project_dir: Path) -> str:
+def _source_fingerprint(project_dir: Path, names: Optional[List[str]] = None) -> str:
     """Stable content hash of ``project_dir``'s ``*.py`` sources.
+
+    When ``names`` (relative filenames) is provided, only those files are
+    hashed — scoping the fingerprint to the scenario's source modules so that
+    adding an unrelated auxiliary file does not count as editing the source.
+    No names falls back to every ``*.py`` under the dir.
 
     Runs the exact snippet the pytest shim uses, so the run-start / run-end
     snapshots are directly comparable to the ``snap`` lines the shim records.
     Returns ``""`` if the fingerprint cannot be computed (fail closed upstream).
     """
     try:
+        args = [sys.executable, "-c", _FINGERPRINT_SNIPPET, str(project_dir)]
+        if names:
+            args.extend(names)
         out = subprocess.run(
-            [sys.executable, "-c", _FINGERPRINT_SNIPPET, str(project_dir)],
-            capture_output=True, text=True, timeout=30,
+            args, capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -937,7 +955,15 @@ def _run_scenario(
     audit_log = scenario_home / ".skillopt" / "pytest.log"
     bin_dir = scenario_home / ".skillopt" / "bin"
     run_nonce = os.urandom(8).hex()
-    _write_pytest_shims(bin_dir, audit_log, run_nonce, project_dir)
+    # Scope the fingerprint to the scenario's source-under-test: every setup file
+    # EXCEPT the protected ones (typically the tests). This means adding an
+    # unrelated auxiliary .py file before reproducing does not count as editing
+    # the source, while changing the actual code under test still flips the hash.
+    setup_files = list(scenario.get("setup", {}).get("files", {}).keys())
+    protected_files = list(scenario.get("protected_files", []))
+    source_names = [f for f in setup_files if f not in protected_files]
+
+    _write_pytest_shims(bin_dir, audit_log, run_nonce, project_dir, source_names)
 
     # Write setup files
     for filename, content in scenario.get("setup", {}).get("files", {}).items():
@@ -950,7 +976,7 @@ def _run_scenario(
     # first failing test's snapshot against this to prove reproduce-before-fix (a
     # fail whose source already differs from the baseline means the source was
     # edited before reproduction).
-    start_snap = _source_fingerprint(project_dir)
+    start_snap = _source_fingerprint(project_dir, source_names)
     with open(audit_log, "a", encoding="utf-8") as fh:
         fh.write(f"{run_nonce} start {start_snap}\n")
 
@@ -1116,7 +1142,7 @@ def _run_scenario(
     # requires the last verified snapshot to equal this, so a source edit made
     # after the final passing test (or after the watcher stopped polling) is
     # still caught instead of silently accepted.
-    end_snap = _source_fingerprint(project_dir)
+    end_snap = _source_fingerprint(project_dir, source_names)
     with open(audit_log, "a", encoding="utf-8") as fh:
         fh.write(f"{run_nonce} end {end_snap}\n")
 
