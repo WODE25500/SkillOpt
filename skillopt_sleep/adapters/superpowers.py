@@ -682,6 +682,10 @@ def _pytest_reproduce_fix_order(audit_log: Path, nonce: str) -> bool:
     # state, i.e. no source edit was made after the final verification.
     if last_verified_snap != end_hash:
         return False
+    # ponytail: parsing pairs each `snap`/`result` by order in the shared log; if
+    # an agent runs two pytest shims truly in parallel their lines can interleave
+    # and mis-pair -> fail closed. Safe default; upgrade to per-pid correlation if
+    # concurrent pytest runs ever become a supported path.
     return True
 
 
@@ -920,6 +924,10 @@ def _run_scenario(
     # EXCEPT the protected ones (typically the tests). This means adding an
     # unrelated auxiliary .py file before reproducing does not count as editing
     # the source, while changing the actual code under test still flips the hash.
+    # ponytail: a fix living entirely in a newly-added module (leaving the original
+    # source byte-identical) is invisible to this scoped hash and would be rejected.
+    # The current scenarios can't hit that (the test imports the named module), but
+    # widen the scope or add the new file to the set if a future scenario requires it.
     setup_files = list(scenario.get("setup", {}).get("files", {}).keys())
     protected_files = list(scenario.get("protected_files", []))
     source_names = [f for f in setup_files if f not in protected_files]
