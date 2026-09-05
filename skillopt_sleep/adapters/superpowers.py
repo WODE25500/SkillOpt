@@ -55,7 +55,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -614,44 +613,6 @@ def _write_pytest_shims(
         )
 
 
-def _watch_edits(
-    audit_log: Path,
-    project_dir: Path,
-    nonce: str,
-    stop: threading.Event,
-    interval: float = 0.05,
-) -> None:
-    """Log ``{nonce} edit <name> <mtime_ns>`` whenever a ``.py`` source file
-    changes, so the audit log holds an ORDERED sequence of edits interleaved
-    with pytest run/result events. Runs in a background thread while the agent
-    executes; the initial state (setup files) is cached and not logged.
-    """
-    last: Dict[str, int] = {}
-    while not stop.is_set():
-        try:
-            for p in project_dir.rglob("*.py"):
-                try:
-                    mt = p.stat().st_mtime_ns
-                except OSError:
-                    continue
-                key = str(p)
-                prev = last.get(key)
-                if prev is None:
-                    # First sight: cache the baseline (setup files, and any new
-                    # source created after the run started) so future scans have a
-                    # previous mtime to compare against. Not logged.
-                    last[key] = mt
-                elif mt != prev:
-                    # Changed since the last scan: log the edit, update the baseline.
-                    last[key] = mt
-                    with open(audit_log, "a", encoding="utf-8") as fh:
-                        fh.write(f"{nonce} edit {p.name} {mt}\n")
-                        fh.flush()
-        except Exception:  # noqa: BLE001 — watcher must never crash the run
-            pass
-        stop.wait(interval)
-
-
 def _pytest_reproduce_fix_order(audit_log: Path, nonce: str) -> bool:
     """True iff a failing pytest run on the ORIGINAL source is followed by a
     passing run on an edited source, and the final on-disk source equals that
@@ -659,10 +620,10 @@ def _pytest_reproduce_fix_order(audit_log: Path, nonce: str) -> bool:
 
     Edit evidence is tied to synchronous source snapshots at each test boundary
     (``snap <hash>``), plus a ``start``/``end`` baseline and final reconciliation.
-    This deliberately ignores the watcher's polling ``edit`` lines, whose
-    append-order can coalesce or omit edits across a scan interval and so cannot
-    establish the invariant. Fails closed when the required order, a fail/pass
-    pair, or the final reconciliation cannot be established.
+    These snapshots are authoritative (a polling mtime watcher was replaced, since
+    its append order can coalesce or omit edits across a scan interval and so
+    cannot establish the invariant). Fails closed when the required order, a
+    fail/pass pair, or the final reconciliation cannot be established.
     """
     try:
         lines = audit_log.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -1093,15 +1054,6 @@ def _run_scenario(
         cmd.extend(["--allowedTools", "Bash,Edit,Write,Read"])
 
     t0 = time.time()
-    # Watch for source edits while the agent runs, so the audit log carries an
-    # ORDERED event sequence (edits + pytest runs) for reproduce-before-fix.
-    watch_stop = threading.Event()
-    watcher = threading.Thread(
-        target=_watch_edits,
-        args=(audit_log, project_dir, run_nonce, watch_stop),
-        daemon=True,
-    )
-    watcher.start()
     try:
         proc = subprocess.run(
             cmd,
@@ -1131,17 +1083,10 @@ def _run_scenario(
     except Exception as e:
         result.error = str(e)
         return result
-    finally:
-        # Always stop the edit watcher before we read the audit log for ordered
-        # evidence. The non-zero-exit / timeout / exception returns above also pass
-        # through here, so a daemon polling thread is never left behind.
-        watch_stop.set()
-        watcher.join(timeout=2)
 
     # Reconcile the FINAL source state after the agent exits. The order judge
     # requires the last verified snapshot to equal this, so a source edit made
-    # after the final passing test (or after the watcher stopped polling) is
-    # still caught instead of silently accepted.
+    # after the final passing test is still caught instead of silently accepted.
     end_snap = _source_fingerprint(project_dir, source_names)
     with open(audit_log, "a", encoding="utf-8") as fh:
         fh.write(f"{run_nonce} end {end_snap}\n")
