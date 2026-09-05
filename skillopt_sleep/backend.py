@@ -2269,9 +2269,13 @@ class DualBackend(Backend):
         self.name = f"target={target.name}/optimizer={optimizer.name}"
 
     def attempt(self, task, skill, memory, sample_id: int = 0):
+        # Snapshot the target total before the attempt so token_delta() can report
+        # a before/after diff when the target lacks the per-call delta method.
+        self._target_tokens_before = self.target.tokens_used()
         return self.target.attempt(task, skill, memory, sample_id=sample_id)
 
     def attempt_with_tools(self, task, skill, memory, tools):
+        self._target_tokens_before = self.target.tokens_used()
         return self.target.attempt_with_tools(task, skill, memory, tools)
 
     def judge(self, task, response):
@@ -2298,7 +2302,14 @@ class DualBackend(Backend):
         # judge() on the rare model-judge fallback (rule/exact/answer tasks are
         # scored locally, 0 tokens); that cost is still counted in the aggregate
         # tokens_used() (target + optimizer), so the total is not undercounted.
-        return getattr(self.target, "token_delta", lambda: 0)()
+        delta_fn = getattr(self.target, "token_delta", None)
+        if delta_fn is not None:
+            return delta_fn()
+        # Compatibility: a target that only implements the older tokens_used()
+        # contract has no per-call delta. Report its same-thread before/after
+        # difference (snapshotted in attempt/attempt_with_tools) so the per-attempt
+        # cost is not silently replaced by a text-length estimate.
+        return max(0, self.target.tokens_used() - getattr(self, "_target_tokens_before", 0))
 
 
 # ── Azure OpenAI backend (gpt-5.x via managed identity) ───────────────────────

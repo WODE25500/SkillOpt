@@ -36,16 +36,24 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
     tools = _required_tools(task)
     tools_called: List[str] = []
     t0 = time.time()
+    # Backends that only expose the older tokens_used() contract (no per-call
+    # token_delta) need a before/after difference on the same thread to report
+    # the call-local cost; snapshot the total before the attempt for them.
+    token_delta_fn = getattr(backend, "token_delta", None)
+    tokens_before = None if token_delta_fn is not None else backend.tokens_used()
     if tools:
         response, tools_called = backend.attempt_with_tools(task, skill, memory, tools)
     else:
         response = backend.attempt(task, skill, memory, sample_id=sample_id)
     latency_ms = (time.time() - t0) * 1000.0
-    # Call-local token accounting (thread-safe under parallel replay): use the
-    # backend's per-call delta rather than a before/after global total, which
-    # another overlapping worker would inflate.
-    token_delta = getattr(backend, "token_delta", None)
-    tokens = token_delta() if token_delta else 0
+    # Call-local token accounting (thread-safe under parallel replay): prefer the
+    # backend's per-call delta (CliBackend/DualBackend use a thread-local delta);
+    # for backends without the new method, use the same-thread before/after total
+    # difference rather than silently substituting a text-length estimate.
+    if token_delta_fn is not None:
+        tokens = token_delta_fn()
+    else:
+        tokens = max(0, backend.tokens_used() - (tokens_before or 0))
     # if the backend doesn't track tokens (e.g. mock), approximate from text length
     if tokens == 0:
         tokens = (len(skill) + len(memory) + len(task.intent) + len(response)) // 4

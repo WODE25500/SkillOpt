@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import threading
 
-from skillopt_sleep.backend import CliBackend
+from skillopt_sleep.backend import CliBackend, Backend, DualBackend
+from skillopt_sleep.replay import replay_one
+from skillopt_sleep.types import TaskRecord
 
 
 class _EchoBackend(CliBackend):
@@ -116,6 +118,45 @@ def test_token_delta_is_call_local():
     b = _EchoBackend()
     b._cached_call("k:1", "hello")
     assert b.token_delta() > 0
+
+
+class _LegacyBackend(Backend):
+    """Implements only the older tokens_used() contract (no token_delta)."""
+
+    def __init__(self, start: int = 100):
+        self._tokens = start
+
+    def tokens_used(self) -> int:
+        return self._tokens
+
+    def attempt(self, task, skill, memory, sample_id: int = 0):
+        self._tokens += 37
+        return "done"
+
+    def judge(self, task, response):
+        return 1.0, 1.0, ""
+
+
+def _task(intent="done"):
+    return TaskRecord(id="t1", project="p1", intent=intent, reference_kind="rule", judge=None)
+
+
+def test_replay_one_legacy_backend_reports_total_diff():
+    """A backend with only tokens_used() (no token_delta) must report the call-local
+    cost as a same-thread before/after difference, not a text-length estimate."""
+    b = _LegacyBackend(start=100)
+    r = replay_one(b, _task(), "", "")
+    assert r.tokens == 37, f"expected 37 (before/after diff), got {r.tokens}"
+
+
+def test_dual_backend_legacy_target_reports_total_diff():
+    """DualBackend wrapping a tokens_used()-only target must report the target's
+    per-attempt cost, not a text-length estimate."""
+    target = _LegacyBackend(start=100)
+    optimizer = _LegacyBackend(start=0)
+    db = DualBackend(target=target, optimizer=optimizer)
+    r = replay_one(db, _task(), "", "")
+    assert r.tokens == 37, f"expected 37 (target diff), got {r.tokens}"
 
 
 def test_token_delta_isolated_between_threads():
