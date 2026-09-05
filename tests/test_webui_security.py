@@ -123,40 +123,35 @@ def test_main_no_auth_by_default(webui, monkeypatch):
 
 
 def test_scan_outputs_rejects_path_traversal(webui, tmp_path, monkeypatch):
-    """scan_outputs must not enumerate directories outside PROJECT_ROOT."""
-    webui_mod = webui
-    monkeypatch.setattr(webui_mod, "PROJECT_ROOT", tmp_path)
+    """The scan_outputs callback must not enumerate directories outside PROJECT_ROOT."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
     (tmp_path / "outputs").mkdir()
-
-    outside = tmp_path / "outputs"
-    result = webui_mod.build_ui.__wrapped__ if hasattr(webui_mod.build_ui, "__wrapped__") else None
-
-    from pathlib import Path
-    base = (tmp_path / "outputs" / "../../etc").resolve()
-    project_resolved = tmp_path.resolve()
-    try:
-        base.relative_to(project_resolved)
-        escaped = False
-    except ValueError:
-        escaped = True
-    assert escaped, "Path traversal via Output Explorer must be blocked"
+    # Every traversal / escape form is denied at consumption: no rows, no reads.
+    for bad in ("/../../etc/passwd", "../outside", "outputs/../../../etc", "C:\\Windows"):
+        assert webui.scan_outputs(bad) == [], f"traversal {bad!r} must be denied"
 
 
 def test_scan_outputs_allows_valid_subdir(webui, tmp_path, monkeypatch):
     """scan_outputs must accept directories within PROJECT_ROOT."""
-    from pathlib import Path
-    project = tmp_path
-    monkeypatch.setattr(webui, "PROJECT_ROOT", project)
-    (project / "outputs" / "bench1" / "run1").mkdir(parents=True)
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "outputs" / "bench1" / "run1").mkdir(parents=True)
+    (tmp_path / "outputs" / "bench1" / "run1" / "config.yaml").write_text("a: 1\n", encoding="utf-8")
+    rows = webui.scan_outputs("outputs")
+    assert rows, "valid in-tree output area must be digested"
 
-    base = (project / "outputs").resolve()
-    project_resolved = project.resolve()
-    try:
-        base.relative_to(project_resolved)
-        contained = True
-    except ValueError:
-        contained = False
-    assert contained, "Valid subdirectory must pass containment check"
+
+def test_scan_outputs_callback_consumes_within_project(webui, tmp_path, monkeypatch):
+    """The registered scan_outputs callback must digest data only inside PROJECT_ROOT
+    at the point data is actually read (traversal denied, in-tree consumed)."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    # A traversal arg must be denied at consumption: no rows, no data read.
+    assert webui.scan_outputs("/../../etc/passwd") == []
+    assert webui.scan_outputs("../outside") == []
+    # A valid in-tree output area is digested (config.yaml read per run dir).
+    (tmp_path / "outputs/bench1/run1").mkdir(parents=True)
+    (tmp_path / "outputs/bench1/run1/config.yaml").write_text("alpha: 1\n", encoding="utf-8")
+    rows = webui.scan_outputs("outputs")
+    assert rows, f"expected rows from a valid in-tree output area, got {rows!r}"
 
 
 def test_main_rejects_incomplete_cli_auth_user_only(webui, monkeypatch):

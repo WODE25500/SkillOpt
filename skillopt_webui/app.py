@@ -46,6 +46,58 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def scan_outputs(out_dir: str) -> list:
+    """Digest experiment results strictly under PROJECT_ROOT.
+
+    The Output Explorer callback. Any path that escapes PROJECT_ROOT is
+    rejected (empty result) at the point data is read, so a traversal arg
+    can never read files outside the project.
+    """
+    rows = []
+    if not out_dir:
+        return rows
+    base = (PROJECT_ROOT / out_dir).resolve()
+    project_resolved = PROJECT_ROOT.resolve()
+    try:
+        base.relative_to(project_resolved)
+    except ValueError:
+        return rows
+    if not base.exists() or not base.is_dir():
+        return rows
+    for bench_dir in sorted(base.iterdir()):
+        if not bench_dir.is_dir():
+            continue
+        for run_dir in sorted(bench_dir.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            cfg_file = run_dir / "config.yaml"
+            score = "—"
+            steps = "—"
+            if cfg_file.exists():
+                try:
+                    c = yaml.safe_load(cfg_file.read_text())
+                    steps = str(c.get("train", {}).get("num_steps", "—"))
+                except Exception:
+                    pass
+            # Try to find best score from logs
+            for log_f in run_dir.glob("**/*.jsonl"):
+                try:
+                    with open(log_f) as f:
+                        for line in f:
+                            d = json.loads(line)
+                            if "score" in d:
+                                score = f"{d['score']:.4f}"
+                except Exception:
+                    pass
+            rows.append([
+                run_dir.name,
+                bench_dir.name,
+                score,
+                steps,
+            ])
+    return rows
+
+
 def config_to_display(cfg: dict) -> str:
     """Pretty-print config for display."""
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False)
@@ -601,51 +653,6 @@ def build_ui():
                     headers=["Experiment", "Benchmark", "Best Score", "Steps"],
                     label="Experiments",
                 )
-
-                def scan_outputs(out_dir):
-                    rows = []
-                    if not out_dir:
-                        return rows
-                    base = (PROJECT_ROOT / out_dir).resolve()
-                    project_resolved = PROJECT_ROOT.resolve()
-                    try:
-                        base.relative_to(project_resolved)
-                    except ValueError:
-                        return rows
-                    if not base.exists() or not base.is_dir():
-                        return rows
-                    for bench_dir in sorted(base.iterdir()):
-                        if not bench_dir.is_dir():
-                            continue
-                        for run_dir in sorted(bench_dir.iterdir()):
-                            if not run_dir.is_dir():
-                                continue
-                            cfg_file = run_dir / "config.yaml"
-                            score = "—"
-                            steps = "—"
-                            if cfg_file.exists():
-                                try:
-                                    c = yaml.safe_load(cfg_file.read_text())
-                                    steps = str(c.get("train", {}).get("num_steps", "—"))
-                                except Exception:
-                                    pass
-                            # Try to find best score from logs
-                            for log_f in run_dir.glob("**/*.jsonl"):
-                                try:
-                                    with open(log_f) as f:
-                                        for line in f:
-                                            d = json.loads(line)
-                                            if "score" in d:
-                                                score = f"{d['score']:.4f}"
-                                except Exception:
-                                    pass
-                            rows.append([
-                                run_dir.name,
-                                bench_dir.name,
-                                score,
-                                steps,
-                            ])
-                    return rows
 
                 scan_btn.click(scan_outputs, output_dir, results_table)
 
