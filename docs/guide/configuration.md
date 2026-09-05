@@ -44,8 +44,8 @@ model:
 | `qwen_chat` | ✓ | ✓ | Qwen served through an OpenAI-compatible endpoint (self-hosted vLLM/SGLang or a hosted gateway) |
 | `minimax_chat` | ✓ | ✓ | MiniMax API |
 | `copilot_chat` | ✓ | ✓ | GitHub Copilot CLI (`copilot -p`); alias `copilot` |
-| `codex_exec` | — | ✓ | Codex CLI execution harness |
-| `claude_code_exec` | — | ✓ | Claude Code CLI execution harness |
+| `codex_exec` | ✓ | ✓ | Codex CLI execution harness |
+| `claude_code_exec` | ✓ | ✓ | Claude Code CLI execution harness |
 | `cursor_exec` | — | ✓ | Cursor Agent CLI execution harness |
 | `copilot_exec` | — | ✓ | GitHub Copilot CLI execution harness |
 
