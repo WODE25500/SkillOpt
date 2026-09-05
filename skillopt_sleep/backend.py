@@ -2516,8 +2516,12 @@ class AzureOpenAIBackend(CliBackend):
             self.last_call_error = (
                 f"{self.deployment}: empty response on all {n_attempts} attempts"
             )
-            self._record_delta(usage_total)
-            self._thread_local.charged_in_call = True
+        # Finalize the accumulated provider usage on EVERY exhausted-retry exit,
+        # even when the last attempt raised (the paid empty attempts still count).
+        # usage_total of 0 = genuinely no paid usage; the marker still set keeps
+        # _cached_call from substituting its length estimate on top.
+        self._record_delta(usage_total)
+        self._thread_local.charged_in_call = True
         return ""
 
 

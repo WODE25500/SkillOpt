@@ -157,3 +157,14 @@ def test_opencode_error_path_uses_record_delta(monkeypatch):
     assert out == "" and called == []
     assert b.token_delta() == 100 // 4, "OpenCode error path did not route through _record_delta"
     assert b._tokens == 100 // 4, f"expected 25, got {b._tokens}"
+
+
+def test_azure_chat_paid_empty_then_terminal_error_keeps_usage():
+    """A paid empty response followed by exhausted exception retries must keep the
+    exact provider usage (7), not fall back to the len//4 length estimate."""
+    be = _azure_chat([_ChatResp("", 7, 0)] + [RuntimeError("boom")] * 4)
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == ""
+    assert be._tokens == 7, f"expected paid usage 7, got {be._tokens}"
+    assert be.token_delta() == 7, f"expected call-local delta 7, got {be.token_delta()}"
