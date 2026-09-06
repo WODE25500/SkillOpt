@@ -58,7 +58,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 SUPERPOWERS_REPO = "https://github.com/obra/superpowers.git"
 DEFAULT_VERSION = "v6.1.1"
@@ -1342,6 +1342,29 @@ def evaluate_skill(
     return evaluator.evaluate(candidate_path, scenario_filter=scenario, pinned_sha=pinned_sha).to_dict()
 
 
+def _evaluate_with_baseline(
+    skill: str,
+    candidate: Optional[str],
+    scenario: Optional[str],
+    sha: str,
+    compare_baseline: bool,
+    *,
+    evaluate_fn: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """Run the evaluation and, when ``compare_baseline`` is set, also run the same
+    scenario WITHOUT the candidate skill and merge it as ``results["_baseline"]``.
+
+    Pure data-flow (no arg parsing / printing / sys.exit), so the baseline wiring
+    is testable offline by injecting ``evaluate_fn``. The baseline run passes
+    ``candidate=None``; errors propagate to the CLI layer unchanged.
+    """
+    fn = evaluate_fn or evaluate_skill
+    results = fn(skill, candidate, scenario=scenario, pinned_sha=sha)
+    if compare_baseline:
+        results["_baseline"] = fn(skill, None, scenario=scenario, pinned_sha=sha)
+    return results
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -1358,7 +1381,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     try:
-        results = evaluate_skill(args.skill, args.candidate, scenario=args.scenario, pinned_sha=args.sha)
+        results = _evaluate_with_baseline(
+            args.skill, args.candidate, args.scenario, args.sha, args.compare_baseline
+        )
     except subprocess.CalledProcessError as e:
         # git init/fetch/checkout failure (bad SHA, no network, no git)
         print(f"Error: git step failed ({' '.join(map(str, e.cmd))}): exit {e.returncode}",
@@ -1368,16 +1393,6 @@ if __name__ == "__main__":
         # missing candidate/git/claude, unknown scenario, non-POSIX host
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    if args.compare_baseline:
-        # Opt-in real-harness baseline-versus-skill run: measure the delta the
-        # candidate skill produces over running the same scenario without it.
-        try:
-            baseline = evaluate_skill(args.skill, None, scenario=args.scenario, pinned_sha=args.sha)
-        except (FileNotFoundError, ValueError, RuntimeError) as e:
-            print(f"Error (baseline): {e}", file=sys.stderr)
-            sys.exit(1)
-        results["_baseline"] = baseline
 
     # fail-closed - exit non-zero if any scenario has error
     has_errors = any(s.get("error") for s in results["scenarios"])
