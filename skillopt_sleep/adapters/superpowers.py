@@ -26,12 +26,11 @@ OPT-IN REAL-HARNESS SMOKE (documented; NOT run here — this PR was developed
 without an authenticated Claude/Codex CLI on a POSIX host, so the live harness
 runs were not executed):
     python -m skillopt_sleep.adapters.superpowers --skill systematic-debugging \
-        [--scenario <id>] [--compare-baseline]
+        [--scenario <id>]
 Run on a POSIX host with an authenticated ``claude`` CLI (see the harness note
-below). The ordered reproduce-before-fix sequence and the baseline-versus-skill
-comparison are validated here ONLY with offline fixtures + adversarial-order
-unit tests; the real-harness runs (including ``--compare-baseline``) remain to be
-executed on such a host.
+below). The ordered reproduce-before-fix sequence is validated here ONLY with
+offline fixtures + adversarial-order unit tests; the real-harness run remains to
+be executed on such a host.
 
 Usage:
     from skillopt_sleep.adapters.superpowers import SuperpowersEvaluator
@@ -58,7 +57,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 SUPERPOWERS_REPO = "https://github.com/obra/superpowers.git"
 DEFAULT_VERSION = "v6.1.1"
@@ -1342,29 +1341,6 @@ def evaluate_skill(
     return evaluator.evaluate(candidate_path, scenario_filter=scenario, pinned_sha=pinned_sha).to_dict()
 
 
-def _evaluate_with_baseline(
-    skill: str,
-    candidate: Optional[str],
-    scenario: Optional[str],
-    sha: str,
-    compare_baseline: bool,
-    *,
-    evaluate_fn: Optional[Callable] = None,
-) -> Dict[str, Any]:
-    """Run the evaluation and, when ``compare_baseline`` is set, also run the same
-    scenario WITHOUT the candidate skill and merge it as ``results["_baseline"]``.
-
-    Pure data-flow (no arg parsing / printing / sys.exit), so the baseline wiring
-    is testable offline by injecting ``evaluate_fn``. The baseline run passes
-    ``candidate=None``; errors propagate to the CLI layer unchanged.
-    """
-    fn = evaluate_fn or evaluate_skill
-    results = fn(skill, candidate, scenario=scenario, pinned_sha=sha)
-    if compare_baseline:
-        results["_baseline"] = fn(skill, None, scenario=scenario, pinned_sha=sha)
-    return results
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -1373,17 +1349,12 @@ if __name__ == "__main__":
     parser.add_argument("--candidate", help="Path to candidate SKILL.md")
     parser.add_argument("--scenario", help="Run only this scenario")
     parser.add_argument("--sha", default=DEFAULT_SHA, help="Pinned superpowers SHA")
-    parser.add_argument("--compare-baseline", action="store_true",
-                        help="OPT-IN real-harness run: also run the scenario WITHOUT the "
-                             "candidate skill and report the delta (needs an authenticated claude CLI)")
     parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
 
     try:
-        results = _evaluate_with_baseline(
-            args.skill, args.candidate, args.scenario, args.sha, args.compare_baseline
-        )
+        results = evaluate_skill(args.skill, args.candidate, scenario=args.scenario, pinned_sha=args.sha)
     except subprocess.CalledProcessError as e:
         # git init/fetch/checkout failure (bad SHA, no network, no git)
         print(f"Error: git step failed ({' '.join(map(str, e.cmd))}): exit {e.returncode}",
@@ -1407,12 +1378,6 @@ if __name__ == "__main__":
             status = "✓" if s["passed"] else "✗"
             err = f" [{s['error']}]" if s.get("error") else ""
             print(f"  {status} {s['id']}{err}")
-        if results.get("_baseline"):
-            bl = results["_baseline"]
-            delta = results["score"] - bl["score"]
-            print(f"\nBaseline (no candidate skill): {bl['score']:.2%} "
-                  f"({bl['passed']}/{bl['passed'] + bl['failed']})")
-            print(f"Candidate delta: {delta:+.2%}")
 
     if has_errors:
         sys.exit(1)
