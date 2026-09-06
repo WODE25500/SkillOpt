@@ -627,11 +627,6 @@ class CliBackend(Backend):
         with self._lock:
             return self._cache.get(key)
 
-    def _cache_pop(self, key: str) -> str | None:
-        """Thread-safe cache pop — used to drop a failed entry without racing."""
-        with self._lock:
-            return self._cache.pop(key, None)
-
     def _cache_pop_if(self, key: str, expected: str | None) -> None:
         """Drop a cache entry only if it still holds ``expected``.
 
@@ -2267,6 +2262,10 @@ class DualBackend(Backend):
         self.target = target
         self.optimizer = optimizer
         self.name = f"target={target.name}/optimizer={optimizer.name}"
+        # NOTE: `_target_tokens_before` (snapshotted in attempt/attempt_with_tools
+        # below) is a SHARED instance attribute, not thread-local. Do NOT share one
+        # DualBackend across parallel replay workers (SKILLOPT_SLEEP_WORKERS>1): the
+        # before/after snapshot would race. Give each worker its own DualBackend.
 
     def attempt(self, task, skill, memory, sample_id: int = 0):
         # Snapshot the target total before the attempt so token_delta() can report
