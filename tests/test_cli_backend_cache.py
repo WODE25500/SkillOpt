@@ -159,6 +159,28 @@ def test_dual_backend_legacy_target_reports_total_diff():
     assert r.tokens == 37, f"expected 37 (target diff), got {r.tokens}"
 
 
+def test_replay_one_cache_hit_reports_zero_tokens():
+    """A replay served from cache has no new model call and must not fall back
+    to a text-length estimate: known-zero call-local usage stays zero."""
+    b = _EchoBackend()
+    task = TaskRecord(
+        id="t1",
+        project="p1",
+        intent="intent text here",
+        reference_kind="exact",
+        reference="expected",
+    )
+
+    first = replay_one(b, task, "skill", "memory")
+    second = replay_one(b, task, "skill", "memory")
+
+    assert b.calls == 1, "cache-hit replay must not invoke the model again"
+    assert first.tokens > 0
+    assert second.tokens == 0, (
+        f"expected 0 tokens for a cache hit, got {second.tokens}"
+    )
+
+
 def test_token_delta_isolated_between_threads():
     """Per-thread token deltas do not leak across parallel workers."""
     b = _EchoBackend()

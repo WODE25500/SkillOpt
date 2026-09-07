@@ -47,16 +47,21 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
         response = backend.attempt(task, skill, memory, sample_id=sample_id)
     latency_ms = (time.time() - t0) * 1000.0
     # Call-local token accounting (thread-safe under parallel replay): prefer the
-    # backend's per-call delta (CliBackend/DualBackend use a thread-local delta);
-    # for backends without the new method, use the same-thread before/after total
-    # difference rather than silently substituting a text-length estimate.
+    # backend's per-call delta (CliBackend/DualBackend use a thread-local delta).
+    # That method reports exact cost, including a known zero for a cache hit, so
+    # no text-length estimate is substituted. A backend that only implements the
+    # older tokens_used() contract has no per-call delta, so use its same-thread
+    # before/after difference and fall back to a length estimate only when it
+    # reports no tracking (zero) at all.
     if token_delta_fn is not None:
         tokens = token_delta_fn()
     else:
         tokens = max(0, backend.tokens_used() - (tokens_before or 0))
-    # if the backend doesn't track tokens (e.g. mock), approximate from text length
-    if tokens == 0:
-        tokens = (len(skill) + len(memory) + len(task.intent) + len(response)) // 4
+        # A backend without token_delta() that still changed tokens_used()
+        # reports that real difference above. Only an unchanged total means the
+        # backend does not track tokens (e.g. a mock), so approximate then.
+        if tokens == 0:
+            tokens = (len(skill) + len(memory) + len(task.intent) + len(response)) // 4
 
     # rule judges may need the detected tool calls; score locally when possible
     if task.reference_kind == "rule" and task.judge:
