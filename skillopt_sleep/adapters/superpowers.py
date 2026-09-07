@@ -22,15 +22,11 @@ test) — it deliberately does NOT attempt to judge whether the agent genuinely
 understood the root cause (a rule judge cannot; the OSS project uses an LLM
 verifier for skill compliance).
 
-OPT-IN REAL-HARNESS SMOKE (documented; NOT run here — this PR was developed
-without an authenticated Claude/Codex CLI on a POSIX host, so the live harness
-runs were not executed):
+OPT-IN LIVE SMOKE (POSIX host + authenticated ``claude`` CLI):
     python -m skillopt_sleep.adapters.superpowers --skill systematic-debugging \
         [--scenario <id>]
-Run on a POSIX host with an authenticated ``claude`` CLI (see the harness note
-below). The ordered reproduce-before-fix sequence is validated here ONLY with
-offline fixtures + adversarial-order unit tests; the real-harness run remains to
-be executed on such a host.
+The judge is validated by offline fixtures + adversarial-order unit tests;
+running the pack against a live Posix harness is an opt-in smoke.
 
 Usage:
     from skillopt_sleep.adapters.superpowers import SuperpowersEvaluator
