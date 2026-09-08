@@ -24,6 +24,38 @@ from skillopt.config import load_config as load_merged_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _ensure_under_project(path: Path) -> Path:
+    """Resolve *path* and fail closed unless it stays under PROJECT_ROOT."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT.resolve())
+    except ValueError:
+        raise ValueError(f"Path escapes project root: {path}")
+    return resolved
+
+
+def _resolve_project_path(user_path: str, *, subdir: str | None = None) -> Path:
+    """Resolve a UI-supplied path, optionally constrained to a project subdir.
+
+    UI callbacks must never trust Gradio component values (e.g. dropdown text):
+    traversal, absolute paths, and symlinks are all rejected here, at the point
+    the path is about to be consumed.
+    """
+    if not user_path:
+        raise ValueError("Path is empty")
+    candidate = Path(user_path)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    resolved = _ensure_under_project(candidate)
+    if subdir is not None:
+        allowed = (PROJECT_ROOT / subdir).resolve()
+        try:
+            resolved.relative_to(allowed)
+        except ValueError:
+            raise ValueError(f"Path must be under {subdir!r}: {user_path}")
+    return resolved
+
 # Gradio moved where `theme` lives across versions: <=5 uses `Blocks(theme=...)`,
 # >=6 moved it to `launch()`. Detect the installed major so the WebUI works on
 # any supported version without an ignored-argument warning or a TypeError.
@@ -42,7 +74,8 @@ def discover_configs() -> list[str]:
 
 def load_config(path: str) -> dict:
     """Load a YAML config file."""
-    with open(PROJECT_ROOT / path) as f:
+    config_file = _resolve_project_path(path, subdir="configs")
+    with open(config_file) as f:
         return yaml.safe_load(f)
 
 
@@ -56,18 +89,24 @@ def scan_outputs(out_dir: str) -> list:
     rows = []
     if not out_dir:
         return rows
-    base = (PROJECT_ROOT / out_dir).resolve()
-    project_resolved = PROJECT_ROOT.resolve()
     try:
-        base.relative_to(project_resolved)
+        base = _resolve_project_path(out_dir)
     except ValueError:
         return rows
     if not base.exists() or not base.is_dir():
         return rows
     for bench_dir in sorted(base.iterdir()):
+        try:
+            bench_dir = _ensure_under_project(bench_dir)
+        except ValueError:
+            continue
         if not bench_dir.is_dir():
             continue
         for run_dir in sorted(bench_dir.iterdir()):
+            try:
+                run_dir = _ensure_under_project(run_dir)
+            except ValueError:
+                continue
             if not run_dir.is_dir():
                 continue
             cfg_file = run_dir / "config.yaml"
@@ -75,6 +114,7 @@ def scan_outputs(out_dir: str) -> list:
             steps = "—"
             if cfg_file.exists():
                 try:
+                    cfg_file = _ensure_under_project(cfg_file)
                     c = yaml.safe_load(cfg_file.read_text())
                     steps = str(c.get("train", {}).get("num_steps", "—"))
                 except Exception:
@@ -82,6 +122,7 @@ def scan_outputs(out_dir: str) -> list:
             # Try to find best score from logs
             for log_f in run_dir.glob("**/*.jsonl"):
                 try:
+                    log_f = _ensure_under_project(log_f)
                     with open(log_f) as f:
                         for line in f:
                             d = json.loads(line)
@@ -101,6 +142,16 @@ def scan_outputs(out_dir: str) -> list:
 def config_to_display(cfg: dict) -> str:
     """Pretty-print config for display."""
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False)
+
+
+def config_preview(path: str) -> str:
+    """Registered config-preview callback: YAML text for an in-tree config."""
+    if not path:
+        return ""
+    try:
+        return config_to_display(load_config(path))
+    except Exception as exc:
+        return f"Error: {exc}"
 
 
 def _can_connect_to_url(url: str, timeout: float = 0.5) -> bool:
@@ -165,7 +216,8 @@ def validate_training_config(
         if value is not None and value != ""
     ]
     try:
-        cfg = flatten_config(load_merged_config(str(PROJECT_ROOT / config_path), cfg_options))
+        config_file = _resolve_project_path(config_path, subdir="configs")
+        cfg = flatten_config(load_merged_config(str(config_file), cfg_options))
     except Exception as exc:
         return f"❌ Invalid config: {exc}"
 
@@ -542,7 +594,7 @@ def build_ui():
                             label="Config File",
                             value=configs[0] if configs else None,
                         )
-                        config_preview = gr.Code(
+                        config_preview_box = gr.Code(
                             label="Config Preview",
                             language="yaml",
                             interactive=False,
@@ -577,15 +629,7 @@ def build_ui():
 
                         status_text = gr.Textbox(label="Status", interactive=False)
 
-                def on_config_change(path):
-                    if path:
-                        try:
-                            return config_to_display(load_config(path))
-                        except Exception as e:
-                            return f"Error: {e}"
-                    return ""
-
-                config_dropdown.change(on_config_change, config_dropdown, config_preview)
+                config_dropdown.change(config_preview, config_dropdown, config_preview_box)
 
                 def on_launch(cfg_path, lr_val, sched, epochs, batch, workers,
                               slow_update, meta_skill, gate):

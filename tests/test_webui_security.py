@@ -154,6 +154,58 @@ def test_scan_outputs_callback_consumes_within_project(webui, tmp_path, monkeypa
     assert rows, f"expected rows from a valid in-tree output area, got {rows!r}"
 
 
+def test_config_preview_rejects_relative_traversal(webui, tmp_path, monkeypatch):
+    """The config-preview callback must not read YAML outside PROJECT_ROOT."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    outside_dir = tmp_path.parent / (tmp_path.name + "_outside")
+    outside_dir.mkdir()
+    secret = outside_dir / "secret.yaml"
+    secret.write_text("password: dummy-secret-value\n", encoding="utf-8")
+
+    result = webui.config_preview(f"../{outside_dir.name}/secret.yaml")
+
+    assert "dummy-secret-value" not in result
+
+
+def test_config_preview_rejects_absolute_outside_path(webui, tmp_path, monkeypatch):
+    """An absolute path escaping PROJECT_ROOT must be denied at consumption."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    outside_dir = tmp_path.parent / (tmp_path.name + "_outside_abs")
+    outside_dir.mkdir()
+    secret = outside_dir / "secret.yaml"
+    secret.write_text("password: dummy-secret-value\n", encoding="utf-8")
+
+    result = webui.config_preview(str(secret))
+
+    assert "dummy-secret-value" not in result
+
+
+def test_config_preview_allows_configs_under_project(webui, tmp_path, monkeypatch):
+    """An in-tree config under configs/ must still preview normally."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "demo.yaml").write_text("name: demo\n", encoding="utf-8")
+
+    result = webui.config_preview("configs/demo.yaml")
+
+    assert "name: demo" in result
+
+
+def test_validate_training_config_rejects_outside_path(webui, tmp_path, monkeypatch):
+    """Launch preflight must reject a config path that escapes PROJECT_ROOT."""
+    monkeypatch.setattr(webui, "PROJECT_ROOT", tmp_path)
+    outside_dir = tmp_path.parent / (tmp_path.name + "_outside_train")
+    outside_dir.mkdir()
+    (outside_dir / "train.yaml").write_text("name: demo\n", encoding="utf-8")
+
+    result = webui.validate_training_config(
+        f"../{outside_dir.name}/train.yaml",
+        {},
+    )
+
+    assert result is not None, "path escaping PROJECT_ROOT must fail closed"
+
+
 def test_main_rejects_incomplete_cli_auth_user_only(webui, monkeypatch):
     """--auth-user without --auth-pass must fail closed (never launch)."""
     webui_mod = webui
