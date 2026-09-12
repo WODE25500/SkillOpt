@@ -1,4 +1,5 @@
 """Tests for Superpowers skill evaluation (offline, no API)."""
+import hashlib
 import os
 import re as _re
 import subprocess
@@ -9,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from skillopt_sleep.adapters.superpowers import (
+    _FINGERPRINT_SNIPPET,
     VERIFICATION_SCENARIOS,
     _get_scenarios,
     _harness_verify,
@@ -32,10 +34,51 @@ def _fake_auth(monkeypatch):
     monkeypatch.delenv("SKILLOPT_UNSAFE", raising=False)
 
 
+def _is_fingerprint_argv(argv) -> bool:
+    """True for the harness' own source-snapshot subprocess.
+
+    ``_source_fingerprint`` shells out to ``python -c <snippet> <dir> [names]``
+    before and after the agent runs. That bookkeeping is not the agent
+    invocation, so a blanket ``subprocess.run`` patch must not read the closing
+    snapshot as "the last agent call" (or as "the agent ran").
+    """
+    return (
+        isinstance(argv, (list, tuple))
+        and len(argv) >= 3
+        and argv[1] == "-c"
+        and str(argv[2]) == _FINGERPRINT_SNIPPET
+    )
+
+
+def _is_fingerprint_call(call) -> bool:
+    argv = call.args[0] if call.args else call.kwargs.get("args")
+    return _is_fingerprint_argv(argv)
+
+
+def _agent_calls(mock_run):
+    """subprocess.run invocations that are not harness bookkeeping."""
+    return [c for c in mock_run.call_args_list if not _is_fingerprint_call(c)]
+
+
+def _agent_call(mock_run):
+    """The single agent invocation; fails loudly if it is not exactly one."""
+    calls = _agent_calls(mock_run)
+    assert len(calls) == 1, f"expected exactly 1 agent call, got {len(calls)}"
+    return calls[0]
+
+
 def _echo_marker(superpowers_dir, extra="ok"):
     """subprocess.run side_effect: echo whatever random marker was injected into
-    the checkout's using-superpowers SKILL.md (simulates a bootstrap load)."""
+    the checkout's using-superpowers SKILL.md (simulates a bootstrap load).
+
+    Snapshot calls answer with a digest-shaped reply instead of the bootstrap
+    marker: they are harness bookkeeping, and echoing the agent's marker back as
+    a source hash would blur the two evidence channels.
+    """
     def _side_effect(cmd, *a, **k):
+        if _is_fingerprint_argv(cmd):
+            digest = hashlib.sha256(repr(tuple(cmd)).encode()).hexdigest()
+            return MagicMock(returncode=0, stdout=digest, stderr="")
         bootstrap = superpowers_dir / "skills" / "using-superpowers" / "SKILL.md"
         marker = ""
         if bootstrap.exists():
@@ -513,7 +556,7 @@ class TestOverlayIntegration:
                     workspace=workspace,
                 )
 
-            cmd = mock_run.call_args[0][0]
+            cmd = _agent_call(mock_run).args[0]
             assert "--plugin-dir" in cmd
             assert str(superpowers_dir) in cmd
             assert "--bare" not in cmd  # --bare skips hooks/plugins
@@ -532,8 +575,9 @@ class TestOverlayIntegration:
                     skill_overlay=None, workspace=workspace,
                 )
 
-            cmd = mock_run.call_args[0][0]
-            assert mock_run.call_args.kwargs["input"] == "hello there"
+            agent = _agent_call(mock_run)
+            cmd = agent.args[0]
+            assert agent.kwargs["input"] == "hello there"
             assert "--output-format" in cmd and "text" in cmd
             assert "hello there" not in cmd
 
@@ -677,6 +721,8 @@ class TestOverlayIntegration:
             echo_marker = _echo_marker(superpowers_dir)
 
             def mutate_test(cmd, *args, **kwargs):
+                if _is_fingerprint_argv(cmd):
+                    return echo_marker(cmd, *args, **kwargs)
                 (Path(kwargs["cwd"]) / "test_guard.py").write_text(
                     "def test_guard():\n    assert True\n"
                 )
@@ -695,7 +741,9 @@ class TestOverlayIntegration:
             assert result.passed is False
             assert result.evidence["protected_files_unchanged"] is False
             assert result.evidence["harness_test_passes"] is False
-            assert mock_run.call_count == 1
+            # one agent run and no harness re-run: the re-run is refused, not
+            # executed, once the protected test file has been touched
+            assert len(_agent_calls(mock_run)) == 1
 
 
 class TestIsolation:
@@ -733,7 +781,7 @@ class TestIsolation:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             _, mock_run = self._run(workspace)
-            env = mock_run.call_args.kwargs["env"]
+            env = _agent_call(mock_run).kwargs["env"]
             assert "SECRET_TOKEN" not in env
             assert env["HOME"] == str(workspace / "home-test")
 
@@ -745,7 +793,7 @@ class TestIsolation:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             _, mock_run = self._run(workspace)
-            path = mock_run.call_args.kwargs["env"]["PATH"]
+            path = _agent_call(mock_run).kwargs["env"]["PATH"]
             assert "/opt/hostonly/bin" not in path
             assert ".skillopt" in path  # shim dir still present
             assert "/usr/bin" in path
@@ -757,7 +805,7 @@ class TestIsolation:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             _, mock_run = self._run(workspace)
-            assert "/opt/hostonly/bin" in mock_run.call_args.kwargs["env"]["PATH"]
+            assert "/opt/hostonly/bin" in _agent_call(mock_run).kwargs["env"]["PATH"]
 
     @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_skill_name_traversal_rejected(self):
@@ -788,7 +836,8 @@ class TestIsolation:
                 )
             assert result.error == "NO_AUTH"
             assert result.passed is False
-            mock_run.assert_not_called()
+            # fail closed before the agent: only the source snapshots may have run
+            assert _agent_calls(mock_run) == []
 
     def test_harness_verify_drops_credential(self):
         """The re-run executes agent-modified code; it must not carry the key."""
@@ -820,7 +869,8 @@ class TestIsolation:
                 )
             assert result.error == "BOOTSTRAP_SKILL_MISSING"
             assert result.evidence["bootstrap_present"] is False
-            mock_run.assert_not_called()  # fail closed before running the agent
+            # fail closed before the agent: only the source snapshots may have run
+            assert _agent_calls(mock_run) == []
 
     def test_harness_verify_respects_timeout(self, monkeypatch):
         """Verify re-run uses the scenario timeout, not a hardcoded 120s."""
@@ -839,7 +889,7 @@ class TestIsolation:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
             _, mock_run = self._run(workspace)
-            assert "/custom/claude" in mock_run.call_args[0][0]
+            assert "/custom/claude" in _agent_call(mock_run).args[0]
 
 
 class TestCLIFailClosed:
@@ -974,7 +1024,7 @@ class TestPermissionModes:
                     skill_overlay=None, workspace=workspace,
                 )
 
-            cmd = mock_run.call_args[0][0]
+            cmd = _agent_call(mock_run).args[0]
             assert "--dangerously-skip-permissions" not in cmd
             assert "--allowedTools" in cmd
 
@@ -995,7 +1045,7 @@ class TestPermissionModes:
                         skill_overlay=None, workspace=workspace,
                     )
 
-            cmd = mock_run.call_args[0][0]
+            cmd = _agent_call(mock_run).args[0]
             assert "--dangerously-skip-permissions" in cmd
             assert "--allowedTools" not in cmd
 
