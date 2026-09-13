@@ -7,6 +7,7 @@ logic without the heavy ``webui`` extra.
 
 from __future__ import annotations
 
+import itertools
 import sys
 import types
 import unittest.mock as mock
@@ -321,28 +322,57 @@ def test_main_cli_credentials_take_precedence_over_env(auth_probe):
     assert launcher.call_args.kwargs["auth"] == ("cli", "clipass")
 
 
-@pytest.mark.parametrize(
-    "argv, env",
-    [
-        # absent: a username with no password anywhere
-        (["--auth-user", "admin"], {}),
-        (["--auth-pass", "s3cret"], {}),
-        ([], {"SKILLOPT_WEBUI_USER": "envuser"}),
-        ([], {"SKILLOPT_WEBUI_PASS": "envpass"}),
-        (["--auth-user", "admin"], {"SKILLOPT_WEBUI_USER": "envuser"}),
-        # configured but blank: must not read as "no authentication requested"
-        (["--auth-user", "", "--auth-pass", ""], {}),
-        ([], {"SKILLOPT_WEBUI_USER": "", "SKILLOPT_WEBUI_PASS": ""}),
-        (["--auth-user", ""], {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": "envpass"}),
-        ([], {"SKILLOPT_WEBUI_USER": "   ", "SKILLOPT_WEBUI_PASS": "envpass"}),
-        ([], {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": ""}),
-    ],
-)
-def test_main_rejects_invalid_auth_configuration(auth_probe, capsys, argv, env):
-    """Incomplete or blank configuration must stop before the UI launches."""
-    launcher, code, builder = auth_probe(argv, env)
+def _expected_auth_outcome(cli_user, cli_pass, env_user, env_pass):
+    """The decision table, restated independently of the implementation.
 
-    assert code == 1
-    assert builder.call_count == 0, "the UI must not be built when auth is invalid"
-    launcher.assert_not_called()
-    assert "authentication" in capsys.readouterr().err.lower()
+    ``None`` means the source was not supplied at all, which is different from
+    an empty string: a supplied-but-blank credential is a misconfiguration.
+    """
+    has_user = cli_user is not None or env_user is not None
+    has_pass = cli_pass is not None or env_pass is not None
+    if not has_user and not has_pass:
+        return "no-auth"
+    if not has_user or not has_pass:
+        return "refuse"
+    user = cli_user if cli_user is not None else env_user
+    password = cli_pass if cli_pass is not None else env_pass
+    if not user.strip() or not password.strip():
+        return "refuse"
+    return (user, password)
+
+
+@pytest.mark.parametrize(
+    "cli_user, cli_pass, env_user, env_pass",
+    list(itertools.product(
+        (None, "", "u"),  # absent, supplied-but-blank, supplied
+        (None, "", "p"),
+        (None, "", "u"),
+        (None, "", "p"),
+    )),
+)
+def test_main_auth_decision_table(auth_probe, cli_user, cli_pass, env_user, env_pass):
+    """Every absent/blank/supplied combination across both sources."""
+    argv = []
+    if cli_user is not None:
+        argv += ["--auth-user", cli_user]
+    if cli_pass is not None:
+        argv += ["--auth-pass", cli_pass]
+    env = {}
+    if env_user is not None:
+        env["SKILLOPT_WEBUI_USER"] = env_user
+    if env_pass is not None:
+        env["SKILLOPT_WEBUI_PASS"] = env_pass
+
+    launcher, code, builder = auth_probe(argv, env)
+    expected = _expected_auth_outcome(cli_user, cli_pass, env_user, env_pass)
+
+    if expected == "refuse":
+        assert code == 1, "invalid auth must stop before the UI"
+        assert builder.call_count == 0
+        launcher.assert_not_called()
+    elif expected == "no-auth":
+        assert code is None
+        assert "auth" not in launcher.call_args.kwargs
+    else:
+        assert code is None
+        assert launcher.call_args.kwargs["auth"] == expected
