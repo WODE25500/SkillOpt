@@ -24,6 +24,11 @@ from skillopt.config import load_config as load_merged_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Gradio moved where `theme` lives across versions: <=5 uses `Blocks(theme=...)`,
+# >=6 moved it to `launch()`. Detect the installed major so the WebUI works on
+# any supported version without an ignored-argument warning or a TypeError.
+_GRADIO_MAJOR = int((getattr(gr, "__version__", "4.0").split(".")[0]) or 4)
+
 
 # ─── Config helpers ──────────────────────────────────────────────────────────
 
@@ -468,9 +473,10 @@ def render_pipeline_html(active_stage: str = "") -> str:
 def build_ui():
     configs = discover_configs()
 
-    with gr.Blocks(
-        title="SkillOpt WebUI",
-    ) as app:
+    _blocks_kwargs = {"title": "SkillOpt WebUI"}
+    if _GRADIO_MAJOR < 6:
+        _blocks_kwargs["theme"] = gr.themes.Soft(primary_hue="indigo")
+    with gr.Blocks(**_blocks_kwargs) as app:
         gr.Markdown("# 🧠 SkillOpt Training Dashboard")
         gr.Markdown("*SKILLOPT: Executive Strategy for Self-Evolving Agent Skills — Configure, launch, and monitor training.*")
 
@@ -598,6 +604,8 @@ def build_ui():
 
                 def scan_outputs(out_dir):
                     rows = []
+                    if not out_dir:
+                        return rows
                     base = PROJECT_ROOT / out_dir
                     if not base.exists():
                         return rows
@@ -639,21 +647,41 @@ def build_ui():
     return app
 
 
+def build_launch_kwargs(server_name: str, server_port: int, share: bool) -> dict:
+    """Build the launch kwargs exactly as production ``main()`` applies them.
+
+    Gradio 6 moved the theme to ``launch()``; applying it here (rather than in
+    ``build_ui``) keeps the theme on the right object for the installed major
+    without an ignored-argument warning. Tests call this so they exercise the
+    same path a real ``skillopt-webui`` run does instead of injecting their own.
+    """
+    kwargs = dict(server_name=server_name, server_port=server_port, share=share)
+    if _GRADIO_MAJOR >= 6:
+        kwargs["theme"] = gr.themes.Soft(primary_hue="indigo")
+    return kwargs
+
+
 def main():
     parser = argparse.ArgumentParser(description="SkillOpt WebUI")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
-    parser.add_argument("--host", type=str, default="0.0.0.0",
-                        help="Server host. Use 0.0.0.0 for public access.")
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Server host. Default is localhost; use 0.0.0.0 "
+                             "to expose publicly (no auth, use with care).")
     args = parser.parse_args()
 
+    if args.host and args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(
+            f"⚠ warning: binding SkillOpt WebUI on {args.host} with no auth "
+            "exposes the Output Explorer (reads any path you type) and the "
+            "training controls to reachable clients. Prefer --host 127.0.0.1; "
+            "use 0.0.0.0 only if you understand the risk.",
+            file=sys.stderr,
+        )
+
     app = build_ui()
-    app.launch(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-        theme=gr.themes.Soft(primary_hue="indigo"),
-    )
+    launch_kwargs = build_launch_kwargs(args.host, args.port, args.share)
+    app.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":

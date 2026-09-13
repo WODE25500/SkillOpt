@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import traceback
+from typing import Any
 
 from skillopt.model import chat_optimizer
 from skillopt.prompts import load_prompt
@@ -156,6 +157,38 @@ def _read_trajectory(rollout_dir: str, task_id: str) -> str:
 # ── Structured comparison pairs ─────────────────────────────────────────────
 
 
+def _is_result_success(res: dict | Any) -> bool:
+    """Determine whether a rollout result indicates success.
+
+    Strictly requires the 'hard' key to be a finite numeric or boolean value in [0, 1].
+    Fails closed for strings, non-finite values, out-of-range values, or missing fields.
+    """
+    if not res or not isinstance(res, dict):
+        return False
+    hard_val = res.get("hard")
+    if isinstance(hard_val, (bool, int, float)) and not isinstance(hard_val, str):
+        import math
+        if math.isfinite(hard_val) and 0.0 <= hard_val <= 1.0:
+            return float(hard_val) >= 0.5
+    return False
+
+
+def _get_soft_score(res: dict | Any) -> float:
+    """Safely extract the soft score from a rollout result.
+
+    Strictly requires the 'soft' key to be a finite numeric or boolean value in [0, 1].
+    Fails closed to 0.0 for strings, non-finite values, out-of-range values, or missing fields.
+    """
+    if not res or not isinstance(res, dict):
+        return 0.0
+    soft_val = res.get("soft")
+    if isinstance(soft_val, (bool, int, float)) and not isinstance(soft_val, str):
+        import math
+        if math.isfinite(soft_val) and 0.0 <= soft_val <= 1.0:
+            return float(soft_val)
+    return 0.0
+
+
 def build_comparison_pairs(
     results_prev: list[dict],
     results_curr: list[dict],
@@ -183,8 +216,8 @@ def build_comparison_pairs(
         tid = str(item.get("id", ""))
         prev = prev_by_id.get(tid, {})
         curr = curr_by_id.get(tid, {})
-        prev_ok = bool(prev.get("hard", 0))
-        curr_ok = bool(curr.get("hard", 0))
+        prev_ok = _is_result_success(prev)
+        curr_ok = _is_result_success(curr)
 
         if not prev_ok and curr_ok:
             category = "improved"
@@ -201,13 +234,13 @@ def build_comparison_pairs(
             "category": category,
             "prev": {
                 "hard": int(prev_ok),
-                "soft": float(prev.get("soft", 0.0)),
+                "soft": _get_soft_score(prev),
                 "predicted_answer": prev.get("predicted_answer", prev.get("answer", "N/A")),
                 "fail_reason": prev.get("fail_reason", ""),
             },
             "curr": {
                 "hard": int(curr_ok),
-                "soft": float(curr.get("soft", 0.0)),
+                "soft": _get_soft_score(curr),
                 "predicted_answer": curr.get("predicted_answer", curr.get("answer", "N/A")),
                 "fail_reason": curr.get("fail_reason", ""),
             },

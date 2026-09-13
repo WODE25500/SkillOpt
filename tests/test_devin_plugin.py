@@ -364,6 +364,7 @@ class TestClaudeHomeExpansion(unittest.TestCase):
             importlib.reload(mcp_server)
 
 
+@unittest.skipIf(os.name == "nt", "Devin installer and hook are POSIX shell scripts")
 class TestDevinInstaller(unittest.TestCase):
     def _run_installer(self, project, home, installer=INSTALLER):
         env = os.environ.copy()

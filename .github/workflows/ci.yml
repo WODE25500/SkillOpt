@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Pytest
+        run: python -m pytest -q
+        env:
+          # Live backend/transcript tests are opt-in (gated on == "1"); keep
+          # them off in CI so the run stays hermetic and fast.
+          SKILLOPT_TEST_REAL_OPENCODE: "0"
+          SKILLOPT_TEST_REAL_OPENCODE_SOURCE: "0"
+
+  webui:
+    # The Gradio theme-compatibility path only exists because gradio changed
+    # where `theme` lives across majors: <6 puts it on Blocks, >=6 on launch().
+    # The main `test` job installs only `.[dev]`, so those tests importorskip
+    # and never exercise this code — run them here across both supported majors.
+    # 5.50.0 is the DECLARED minimum in the `webui` extra (gradio>=5.50.0,<7),
+    # so the matrix tests the actual floor, not just a mid-version.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gradio-version: ["5.50.0", "6.26.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (core + pinned gradio)
+        run: pip install -e ".[dev]" "gradio==${{ matrix.gradio-version }}"
+      - name: Pytest (gradio webui)
+        run: python -m pytest tests/test_webui_build_gradio.py tests/test_webui_env_preflight.py -q
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[docs]"
+      - name: Build docs (strict)
+        run: mkdocs build --strict

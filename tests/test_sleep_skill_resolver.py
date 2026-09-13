@@ -29,6 +29,10 @@ def _write_skill(root, name, body="# skill\n"):
     return path
 
 
+def _canonical(path):
+    return os.path.realpath(os.path.abspath(path))
+
+
 def _symlink(test, source, link_name):
     """Create a symlink, or skip the test where the platform refuses one.
 
@@ -178,7 +182,9 @@ class TestSkillSearchRoots(unittest.TestCase):
             )
             os.makedirs(plugin_skills)
             cfg = load_config(claude_home=claude_home)
-            self.assertEqual(skill_search_roots(cfg), [skills, plugin_skills])
+            self.assertEqual(
+                skill_search_roots(cfg), [_canonical(skills), _canonical(plugin_skills)]
+            )
 
     def test_absent_roots_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -249,7 +255,7 @@ class TestSkillSearchRoots(unittest.TestCase):
                 self.skipTest("directory is still readable after chmod 000")
             try:
                 cfg = load_config(claude_home=claude_home)
-                self.assertEqual(skill_search_roots(cfg), [skills])
+                self.assertEqual(skill_search_roots(cfg), [_canonical(skills)])
             finally:
                 try:
                     os.chmod(cache, 0o700)
@@ -279,7 +285,9 @@ class TestSkillSearchRoots(unittest.TestCase):
             )
             cfg = load_config(claude_home=claude_home)
             self.assertIn(
-                os.path.join(cache, "claude-plugins-official", "superpowers", "5.0.7", "skills"),
+                _canonical(os.path.join(
+                    cache, "claude-plugins-official", "superpowers", "5.0.7", "skills"
+                )),
                 skill_search_roots(cfg),
             )
             res = resolve_skill("brainstorming", skill_search_roots(cfg))
@@ -292,11 +300,13 @@ class TestSkillSearchRoots(unittest.TestCase):
         # peer root would make an ordinary upgrade resolve AMBIGUOUS.
         with tempfile.TemporaryDirectory() as tmp:
             claude_home = os.path.join(tmp, ".claude")
-            plugin = os.path.join(claude_home, "plugins", "cache",
-                                  "claude-plugins-official", "chrome-devtools-mcp")
+            plugin = _canonical(os.path.join(
+                claude_home, "plugins", "cache",
+                "claude-plugins-official", "chrome-devtools-mcp"
+            ))
             for version in ["1.1.1", "1.5.0", "1.6.0"]:
                 _write_skill(os.path.join(plugin, version, "skills"), "chrome-devtools")
-            newest = os.path.join(plugin, "1.6.0", "skills")
+            newest = _canonical(os.path.join(plugin, "1.6.0", "skills"))
 
             cfg = load_config(claude_home=claude_home)
             roots = skill_search_roots(cfg)
@@ -310,13 +320,15 @@ class TestSkillSearchRoots(unittest.TestCase):
     def test_version_ordering_is_numeric_not_lexicographic(self):
         with tempfile.TemporaryDirectory() as tmp:
             claude_home = os.path.join(tmp, ".claude")
-            plugin = os.path.join(claude_home, "plugins", "cache", "market", "plugin")
+            plugin = _canonical(os.path.join(
+                claude_home, "plugins", "cache", "market", "plugin"
+            ))
             for version in ["1.9.0", "1.10.0"]:
                 _write_skill(os.path.join(plugin, version, "skills"), "example-skill")
             cfg = load_config(claude_home=claude_home)
             roots = [r for r in skill_search_roots(cfg) if r.startswith(plugin)]
             # "1.10.0" < "1.9.0" as strings; it must still win as a version.
-            self.assertEqual(roots, [os.path.join(plugin, "1.10.0", "skills")])
+            self.assertEqual(roots, [_canonical(os.path.join(plugin, "1.10.0", "skills"))])
 
     def test_stable_release_beats_an_installed_prerelease(self):
         # Segment lists alone would rank 2.0.0-beta above 2.0.0, because a
@@ -324,12 +336,14 @@ class TestSkillSearchRoots(unittest.TestCase):
         # must never be preferred over the stable release it precedes.
         with tempfile.TemporaryDirectory() as tmp:
             claude_home = os.path.join(tmp, ".claude")
-            plugin = os.path.join(claude_home, "plugins", "cache", "market", "plugin")
+            plugin = _canonical(os.path.join(
+                claude_home, "plugins", "cache", "market", "plugin"
+            ))
             for version in ["2.0.0", "2.0.0-beta"]:
                 _write_skill(os.path.join(plugin, version, "skills"), "example-skill")
             cfg = load_config(claude_home=claude_home)
             roots = [r for r in skill_search_roots(cfg) if r.startswith(plugin)]
-            self.assertEqual(roots, [os.path.join(plugin, "2.0.0", "skills")])
+            self.assertEqual(roots, [_canonical(os.path.join(plugin, "2.0.0", "skills"))])
 
     def test_version_key_orders_release_forms_sensibly(self):
         from skillopt_sleep.skill_resolver import _version_sort_key as key
@@ -346,7 +360,7 @@ class TestSkillSearchRoots(unittest.TestCase):
             plugin = os.path.join(claude_home, "plugins", "cache", "market", "plugin")
             expected = _write_skill(os.path.join(plugin, "skills"), "example-skill")
             cfg = load_config(claude_home=claude_home)
-            self.assertIn(os.path.join(plugin, "skills"), skill_search_roots(cfg))
+            self.assertIn(_canonical(os.path.join(plugin, "skills")), skill_search_roots(cfg))
             res = resolve_skill("example-skill", skill_search_roots(cfg))
             self.assertEqual(res.status, FOUND)
             self.assertEqual(res.path, os.path.realpath(expected))
@@ -361,8 +375,8 @@ class TestSkillSearchRoots(unittest.TestCase):
             _write_skill(cognee, "cognee-remember")
             cfg = load_config(claude_home=claude_home)
             roots = skill_search_roots(cfg)
-            self.assertIn(official, roots)
-            self.assertIn(cognee, roots)
+            self.assertIn(_canonical(official), roots)
+            self.assertIn(_canonical(cognee), roots)
 
     def test_legacy_target_skill_path_behavior_is_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:

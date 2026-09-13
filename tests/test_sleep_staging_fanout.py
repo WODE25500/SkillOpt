@@ -32,6 +32,10 @@ def _proposal(name="example-skill", body="# example\n", live=None, root="/tmp/li
     return SkillProposal(name, body, live)
 
 
+def _canonical(path):
+    return os.path.realpath(os.path.abspath(os.path.normpath(path)))
+
+
 def _report():
     return SleepReport(night=1, project="/repo/example", accepted=True,
                        gate_action="accept_new_best")
@@ -44,7 +48,7 @@ class TestSkillProposalRows(unittest.TestCase):
         self.assertEqual([r["proposed_file"] for r in rows],
                          ["proposed_SKILL.alpha.md", "proposed_SKILL.beta.md"])
         self.assertEqual(rows[0]["live_skill_path"],
-                         os.path.normpath("/tmp/live/alpha/SKILL.md"))
+                         _canonical("/tmp/live/alpha/SKILL.md"))
         self.assertEqual(
             rows[0]["sha256"],
             hashlib.sha256(b"# example\n").hexdigest(),
@@ -126,14 +130,14 @@ class TestSkillProposalRows(unittest.TestCase):
         # duplicate separators everywhere, and every forward-slash absolute
         # path on Windows. Normalising first keeps the traversal guard.
         rows = skill_proposal_rows([_proposal("alpha", live="/tmp/live//alpha/SKILL.md")])
-        self.assertEqual(rows[0]["live_skill_path"], os.path.normpath("/tmp/live/alpha/SKILL.md"))
+        self.assertEqual(rows[0]["live_skill_path"], _canonical("/tmp/live/alpha/SKILL.md"))
 
     def test_current_directory_segments_are_normalised_not_refused(self):
         rows = skill_proposal_rows([
             _proposal("alpha", live="/tmp/live/./alpha/SKILL.md")
         ])
         self.assertEqual(rows[0]["live_skill_path"],
-                         os.path.normpath("/tmp/live/alpha/SKILL.md"))
+                         _canonical("/tmp/live/alpha/SKILL.md"))
 
     def test_two_skills_targeting_one_file_are_refused(self):
         shared = "/tmp/live/shared/SKILL.md"
@@ -297,7 +301,7 @@ class TestWriteStagingCompatibility(unittest.TestCase):
             rows = self._manifest(out)["skills"]
             self.assertEqual([r["skill_name"] for r in rows], ["alpha", "beta"])
             self.assertEqual(rows[1]["live_skill_path"],
-                             os.path.join(live_root, "beta", "SKILL.md"))
+                             _canonical(os.path.join(live_root, "beta", "SKILL.md")))
             self.assertEqual(
                 rows[0]["sha256"],
                 hashlib.sha256(b"# alpha\n").hexdigest(),
@@ -367,6 +371,122 @@ class TestWriteStagingCompatibility(unittest.TestCase):
                 encoding="utf-8",
             ) as handle:
                 self.assertEqual(handle.read().strip(), os.path.basename(latest))
+
+    def test_latest_pointer_retries_a_transient_windows_sharing_violation(self):
+        from skillopt_sleep import staging as staging_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, ".skillopt-sleep", "staging")
+            night = os.path.join(root, "20260815-010203")
+            os.makedirs(night)
+            with open(os.path.join(night, "manifest.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+            real_replace = os.replace
+            calls = []
+
+            def transient_replace(source, destination):
+                calls.append((source, destination))
+                if len(calls) == 1:
+                    raise PermissionError("simulated Windows sharing violation")
+                return real_replace(source, destination)
+
+            with mock.patch.object(staging_mod.os, "name", "nt"), mock.patch.object(
+                staging_mod.os, "replace", side_effect=transient_replace
+            ), mock.patch.object(staging_mod.time, "sleep") as sleep:
+                staging_mod._publish_latest(root, night)
+
+            self.assertEqual(len(calls), 2)
+            sleep.assert_called_once_with(0.005)
+            with open(os.path.join(root, ".latest"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "20260815-010203\n")
+
+    def test_generic_atomic_write_never_retries_permission_error(self):
+        from skillopt_sleep import staging as staging_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = os.path.join(tmp, "live.md")
+            with open(destination, "wb") as handle:
+                handle.write(b"original")
+            with mock.patch.object(staging_mod.os, "name", "nt"), mock.patch.object(
+                staging_mod.os,
+                "replace",
+                side_effect=PermissionError("live file is busy"),
+            ) as replace, self.assertRaises(PermissionError):
+                staging_mod._write_atomic_bytes(destination, b"proposal")
+
+            replace.assert_called_once()
+            with open(destination, "rb") as handle:
+                self.assertEqual(handle.read(), b"original")
+            self.assertFalse(any(name.startswith(".tmp-") for name in os.listdir(tmp)))
+
+    def test_latest_pointer_persistent_error_preserves_destination_and_cleans_temp(self):
+        from skillopt_sleep import staging as staging_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, ".skillopt-sleep", "staging")
+            night = os.path.join(root, "20260815-010203")
+            os.makedirs(night)
+            with open(os.path.join(night, "manifest.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+            pointer = os.path.join(root, ".latest")
+            with open(pointer, "w", encoding="utf-8") as handle:
+                handle.write("20260814-010203\n")
+
+            with mock.patch.object(staging_mod.os, "name", "nt"), mock.patch.object(
+                staging_mod.os,
+                "replace",
+                side_effect=PermissionError("pointer remains busy"),
+            ) as replace, mock.patch.object(staging_mod.time, "sleep"), self.assertRaises(
+                PermissionError
+            ):
+                staging_mod._publish_latest(root, night)
+
+            self.assertEqual(replace.call_count, 21)
+            with open(pointer, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "20260814-010203\n")
+            self.assertFalse(any(name.startswith(".tmp-") for name in os.listdir(root)))
+
+    def test_staging_descendant_accepts_root_alias_but_rejects_child_symlink(self):
+        from skillopt_sleep import staging as staging_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real_root = os.path.join(tmp, "real-staging")
+            os.makedirs(real_root)
+            alias_root = os.path.join(tmp, "staging-alias")
+            outside = os.path.join(tmp, "outside")
+            os.makedirs(outside)
+            try:
+                os.symlink(real_root, alias_root, target_is_directory=True)
+                os.symlink(
+                    outside,
+                    os.path.join(real_root, "child-alias"),
+                    target_is_directory=True,
+                )
+            except OSError:
+                self.skipTest("directory symlinks unavailable")
+
+            ordinary_lexical = os.path.join(real_root, "backup.md")
+            with open(ordinary_lexical, "w", encoding="utf-8") as handle:
+                handle.write("backup")
+            # WAL/manifest paths are canonical, while callers can still supply
+            # the same staging root through a lexical alias.
+            ordinary = os.path.realpath(ordinary_lexical)
+            escaped = os.path.join(alias_root, "child-alias", "outside.md")
+            with open(os.path.join(outside, "outside.md"), "w", encoding="utf-8") as handle:
+                handle.write("outside")
+
+            self.assertTrue(
+                staging_mod._existing_path_is_canonical_staging_descendant(
+                    ordinary,
+                    alias_root,
+                )
+            )
+            self.assertFalse(
+                staging_mod._existing_path_is_canonical_staging_descendant(
+                    escaped,
+                    alias_root,
+                )
+            )
 
     def test_latest_ignores_a_symlinked_night(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1375,7 +1375,9 @@ class TestFullCycleAndAdopt(unittest.TestCase):
 
     def test_cycle_can_target_repo_scoped_skill_path(self):
         with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
-            target = os.path.abspath(os.path.join(proj, ".agents/skills/taste-skill/SKILL.md"))
+            target = os.path.realpath(
+                os.path.abspath(os.path.join(proj, ".agents/skills/taste-skill/SKILL.md"))
+            )
             cfg = load_config(
                 invoked_project=proj,
                 projects="invoked",
@@ -1744,7 +1746,7 @@ class TestCursorBackend(unittest.TestCase):
         )
         self.assertEqual(
             cfg.cursor_projects_dir,
-            os.path.join(os.path.expanduser("~/.cursor-custom"), "projects"),
+            os.path.join(os.path.abspath(os.path.expanduser("~/.cursor-custom")), "projects"),
         )
 
         direct_cfg = load_config(
@@ -1753,7 +1755,7 @@ class TestCursorBackend(unittest.TestCase):
         )
         self.assertEqual(
             direct_cfg.cursor_projects_dir,
-            os.path.join(os.path.expanduser("~/.cursor-config"), "projects"),
+            os.path.join(os.path.abspath(os.path.expanduser("~/.cursor-config")), "projects"),
         )
         self.assertEqual(
             resolve_cursor_path(direct_cfg.get("cursor_path")),

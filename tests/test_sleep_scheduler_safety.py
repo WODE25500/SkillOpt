@@ -11,6 +11,7 @@ from skillopt_sleep import scheduler
 
 
 class TestSleepSchedulerSafety(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX runner quoting is not used on Windows")
     def test_posix_runner_quotes_every_path_and_argument(self):
         with tempfile.TemporaryDirectory(prefix="sleep $' quote ") as project:
             command = scheduler._runner_cmd(

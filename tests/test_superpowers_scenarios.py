@@ -1,13 +1,12 @@
 """Tests for Superpowers skill evaluation (offline, no API)."""
 import os
+import re as _re
 import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-import re as _re
 
 from skillopt_sleep.adapters.superpowers import (
     VERIFICATION_SCENARIOS,
@@ -269,6 +268,7 @@ class TestHarnessEvidence:
         results = [_score_check(c, "1 passed", None, evidence) for c in flaky["judge"]["checks"]]
         assert all(results) is False
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
     def test_shim_counts_real_invocations(self):
         """The shim logs every pytest run, including `python -m pytest`."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -288,6 +288,7 @@ class TestHarnessEvidence:
                 "failures": 0,
             }
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
     def test_shim_handles_shell_metacharacters_in_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir) / "space $HOME"
@@ -302,6 +303,7 @@ class TestHarnessEvidence:
             assert _pytest_run_count(log, "abc123") == 1
             assert _pytest_outcome_counts(log, "abc123")["successes"] == 1
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
     def test_python_shim_matches_module_arguments_not_command_text(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
@@ -323,6 +325,7 @@ class TestHarnessEvidence:
             assert _pytest_run_count(log, "abc123") == 1
             assert _pytest_outcome_counts(log, "abc123")["successes"] == 1
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
     def test_zero_work_and_skipped_runs_are_not_successes(self):
         """Exit code zero alone is not evidence that a test actually passed."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -362,6 +365,7 @@ class TestHarnessEvidence:
             (ws / "broken.py").symlink_to(ws / "missing.py")
             assert _pytest_after_edit(log, ws) is False
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX pytest shims")
     def test_shim_stamps_attempt_number(self):
         """SKILLOPT_ATTEMPT is set by the shim, so the flaky test can't be faked."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -427,6 +431,7 @@ class TestHarnessEvidence:
             )
             assert _harness_verify(ws, dict(os.environ), test_paths=["test_guard.py"]) is True
 
+    @pytest.mark.skipif(os.name != "posix", reason="test executes POSIX agent shims")
     def test_agent_shim_does_not_reuse_stale_bytecode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             ws = Path(tmpdir)
@@ -455,6 +460,7 @@ class TestHarnessEvidence:
             }
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Superpowers adapter requires POSIX bash")
 class TestOverlayIntegration:
     """Mocked tests proving skill overlay and bootstrap are set up correctly."""
 
@@ -712,6 +718,7 @@ class TestIsolation:
             )
         return result, mock_run
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_no_host_credentials_by_default(self):
         """Regression: host ~/.claude auth/config is never linked into scenario HOME."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -720,6 +727,7 @@ class TestIsolation:
             claude_dir = workspace / "home-test" / ".claude"
             assert list(claude_dir.iterdir()) == []
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_env_is_scrubbed(self, monkeypatch):
         monkeypatch.setenv("SECRET_TOKEN", "leak-me")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -729,6 +737,7 @@ class TestIsolation:
             assert "SECRET_TOKEN" not in env
             assert env["HOME"] == str(workspace / "home-test")
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_path_is_minimal_by_default(self, monkeypatch):
         """Host PATH is not inherited unless SKILLOPT_INHERIT_PATH=1."""
         monkeypatch.setenv("PATH", f"/opt/hostonly/bin{os.pathsep}/usr/bin")
@@ -741,6 +750,7 @@ class TestIsolation:
             assert ".skillopt" in path  # shim dir still present
             assert "/usr/bin" in path
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_path_inherit_opt_in(self, monkeypatch):
         monkeypatch.setenv("PATH", f"/opt/hostonly/bin{os.pathsep}/usr/bin")
         monkeypatch.setenv("SKILLOPT_INHERIT_PATH", "1")
@@ -749,6 +759,7 @@ class TestIsolation:
             _, mock_run = self._run(workspace)
             assert "/opt/hostonly/bin" in mock_run.call_args.kwargs["env"]["PATH"]
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_skill_name_traversal_rejected(self):
         """A skill_name with path separators must not redirect the overlay write."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -763,6 +774,7 @@ class TestIsolation:
                             skill_overlay=None, workspace=workspace,
                         )
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_fails_closed_without_auth(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -792,6 +804,7 @@ class TestIsolation:
             assert mock_run.call_args.kwargs["env"]["PATH"] == "/scrubbed/bin"
             assert "-m" in mock_run.call_args[0][0]
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_missing_bootstrap_flags_error(self):
         """Absent using-superpowers SKILL.md must surface a distinct error."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -820,6 +833,7 @@ class TestIsolation:
                 _harness_verify(ws / "p", {}, timeout=600)
             assert mock_run.call_args.kwargs["timeout"] == 600
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_claude_bin_override(self, monkeypatch):
         monkeypatch.setenv("SKILLOPT_CLAUDE_BIN", "/custom/claude")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -859,6 +873,7 @@ class TestCLIFailClosed:
             with pytest.raises(ValueError, match="must not be a symlink"):
                 SuperpowersEvaluator().evaluate(candidate_skill_path=str(link))
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_private_runner_also_refuses_symlinked_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -884,6 +899,7 @@ class TestCLIFailClosed:
                     workspace=workspace,
                 )
 
+    @pytest.mark.skipif(os.name != "posix", reason="scenario runner requires POSIX bash")
     def test_symlinked_overlay_path_refused(self):
         """A symlinked skills/ component in the checkout must be refused, no write."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -935,6 +951,7 @@ class TestCLIFailClosed:
                     _run_git_step(["fetch", "origin"], Path(tmpdir), timeout=12)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Superpowers adapter requires POSIX bash")
 class TestPermissionModes:
     """Tests for permission handling in cmd construction."""
 

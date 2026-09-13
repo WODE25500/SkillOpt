@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -73,6 +74,25 @@ def render_skill_md(
     return "\n".join(chunks)
 
 
+def _is_symlink_privilege_error(exc: OSError) -> bool:
+    """Return True only for the Windows 'symlink privilege not held' case.
+
+    We must not mask a real collision/error by silently falling back to a copy;
+    only the case where the OS refuses to create a symlink because the caller
+    lacks SeCreateSymbolicLinkPrivilege (Windows Developer Mode / elevation)
+    should fall back to a copy inside a private work dir.
+    """
+    if getattr(exc, "winerror", None) in (1314,):  # ERROR_PRIVILEGE_NOT_HELD
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in {
+            getattr(errno, "EPERM", -1),
+            getattr(errno, "ENOTSUP", -1),
+            getattr(errno, "EOPNOTSUPP", -1),
+        }
+    return False
+
+
 def prepare_workspace(
     *,
     work_dir: str,
@@ -120,7 +140,22 @@ def prepare_workspace(
             parent = os.path.dirname(dst)
             if parent:
                 os.makedirs(parent, exist_ok=True)
-            os.symlink(os.path.abspath(src), dst)
+            src_abs = os.path.abspath(src)
+            if os.path.lexists(dst):
+                raise FileExistsError(
+                    f"link destination already exists: {dst} (from {src})"
+                )
+            try:
+                os.symlink(src_abs, dst, target_is_directory=os.path.isdir(src_abs))
+            except OSError as exc:
+                # Fail closed: only fall back for the Windows symlink-privilege
+                # case, and never merge into an existing destination.
+                if not _is_symlink_privilege_error(exc):
+                    raise
+                if os.path.isdir(src_abs):
+                    shutil.copytree(src_abs, dst)
+                else:
+                    shutil.copy2(src_abs, dst)
 
     attachment_lines: list[str] = []
     if images:
@@ -1479,8 +1514,115 @@ _CURSOR_SECRET_TRACE_FIELDS = {
 }
 
 
+# ``"token": "..."`` / ``"accessToken": {...}`` quoted JSON pairs, matched in
+# arbitrary (possibly non-JSON) text. Value may be a string, number, bool, or a
+# nested object/array literal quoted as a unit — we redact the whole payload.
+# Applied FIRST inside ``_redact_cursor_error``: the unquoted keyword regex below
+# stops at the first whitespace, so ``"token": "a b c"`` would otherwise leak
+# ``b c"``. Capturing the whole quoted payload up front fixes that, and since
+# ``_redact_cursor_error`` is the single shared string redactor, one change
+# covers the copilot fallback, the cursor stderr paths, and string leaves.
+# ponytail: the object branch is single-level only; deep-nested values under a
+# secret key in non-JSON text are not stripped (valid-JSON lines already go
+# through the structural walker). Add an unbounded nest parser if that ever
+# appears in real stderr.
+_COPILOT_SECRET_KEY_SUFFIXES = (
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "token",
+    "password",
+    "passwd",
+    "clientsecret",
+    "secret",
+    "secretkey",
+    "secretaccesskey",
+    "sharedaccesskey",
+    "privatekey",
+    "accountkey",
+    "cookie",
+    "setcookie",
+)
+_COPILOT_SECRET_KEY_EXACT = {"pwd", "sig", "authorization", "bearer"}
+
+def _is_copilot_secret_key(field: str) -> bool:
+    """The single mapping-aware secret-key policy for the Copilot path.
+
+    Uses endswith on the compacted key (mirroring ``_is_secret_mapping_key``), so
+    ``token`` / ``api_key`` / ``refreshToken`` / ``bearer`` / ``cookie`` are
+    redacted, but ``token_count`` / ``token_budget`` / ``secret_version``
+    diagnostics are preserved.
+    """
+    compact = re.sub(r"[^a-z0-9]", "", (field or "").casefold())
+    return compact in _COPILOT_SECRET_KEY_EXACT or compact.endswith(_COPILOT_SECRET_KEY_SUFFIXES)
+
+
+def _find_json_end(text: str, start: int) -> int | None:
+    """Bracket-match a JSON object/array starting at ``start`` (unbounded nesting).
+
+    String-aware (handles quotes and escapes), so a ``{`` inside a string value
+    does not confuse the matching.
+    """
+    open_ch = text[start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    in_str = False
+    escaped = False
+    for k in range(start, len(text)):
+        ch = text[k]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+                if depth == 0:
+                    return k
+    return None
+
+
+def _redact_embedded_json(text: str) -> str:
+    """Structurally redact JSON objects/arrays embedded in plain text.
+
+    Finds balanced JSON fragments (unbounded nesting, string-aware) and walks
+    each with the mapping-aware redactor, so deeply nested or pretty-printed
+    JSON embedded in a non-JSON line no longer leaks. Non-JSON text is preserved.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "{[":
+            end = _find_json_end(text, i)
+            if end is not None:
+                frag = text[i:end + 1]
+                try:
+                    obj = json.loads(frag)
+                except (ValueError, TypeError):
+                    out.append(ch)
+                    i += 1
+                    continue
+                out.append(json.dumps(_redact_copilot_json(obj), ensure_ascii=False))
+                i = end + 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _redact_cursor_error(value: str) -> str:
-    text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", value or "")
+    text = value or ""
+    text = _redact_embedded_json(text)
+    text = _CURSOR_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
     return _CURSOR_SECRET_TOKEN.sub("[REDACTED]", text)
 
 
@@ -1503,6 +1645,42 @@ def _sanitize_cursor_json(value: Any, *, field: str = "") -> Any:
     if isinstance(value, str):
         return _redact_cursor_error(value)
     return value
+
+
+def _redact_copilot_json(value: Any, *, field: str = "") -> Any:
+    """Mapping-key-aware redaction for Copilot JSONL.
+
+    Unlike the cursor trace sanitizer, this does NOT omit ``content``/``prompt``
+    (those are the CLI output we want to keep debuggable); it redacts by secret
+    field name and applies the string-level redactor to remaining string leaves.
+    Uses the SAME key policy as the embedded-JSON fallback so valid JSON and
+    non-JSON fragments agree on what a secret field is.
+    """
+    if _is_copilot_secret_key(field):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(key): _redact_copilot_json(item, field=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_copilot_json(item) for item in value]
+    if isinstance(value, str):
+        return _redact_cursor_error(value)
+    return value
+
+
+def _redact_copilot_trace(raw: str | bytes) -> str:
+    """Sanitize Copilot JSONL output (mapping-key aware, unbounded nesting).
+
+    The whole text is scanned for JSON objects/arrays (single-line, multiple
+    fragments, or pretty-printed / deeply nested) and each is walked with the
+    mapping-aware redactor; remaining non-JSON text gets string-level redaction
+    for ``key=value`` and token patterns. This replaces the old line-by-line
+    regex, which only handled single-level object values.
+    """
+    text = _cursor_process_text(raw)
+    return _redact_cursor_error(text)
 
 
 def _cursor_process_text(value: str | bytes) -> str:
@@ -1771,14 +1949,15 @@ def run_copilot_exec(
 
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
-        safe_raw = stdout
+        safe_raw = _redact_copilot_trace(stdout)
         if stderr:
-            safe_raw = f"{safe_raw}\n[stderr]\n{stderr}" if safe_raw else f"[stderr]\n{stderr}"
+            safe_stderr = _redact_copilot_trace(stderr)
+            safe_raw = f"{safe_raw}\n[stderr]\n{safe_stderr}" if safe_raw else f"[stderr]\n{safe_stderr}"
         all_raw.append(f"===== COPILOT CLI ATTEMPT {attempt + 1} =====\n{safe_raw}")
         combined = "\n\n".join(all_raw)
 
         if proc.returncode != 0:
-            detail = (stderr or stdout).strip()[:4000]
+            detail = _redact_copilot_trace((stderr or stdout).strip())[:4000]
             raise RuntimeError(
                 f"Copilot CLI failed with exit code {proc.returncode}: {detail}"
             )

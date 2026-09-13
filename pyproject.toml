@@ -45,7 +45,14 @@ searchqa = ["datasets>=2.18.0"]
 # Documentation site
 docs = ["mkdocs-material>=9.5.0", "mkdocstrings[python]>=0.24.0"]
 # WebUI dashboard
-webui = ["gradio>=4.0.0"]
+# Broad gradio support is tied to a single huggingface_hub bound: gradio 4/5
+# need huggingface-hub<1 (gradio 4.44 imports HfFolder), but gradio 6 needs
+# huggingface-hub>=1.16. A single bound cannot satisfy both, so narrow the range
+# to the two majors this project actually validates (5 exercises the Blocks
+# theme path, 6 the launch() theme path); the CI matrix tests both. The floor
+# is 5.50.0: earlier gradio 5.x (5.0-5.49) still import HfFolder or don't apply
+# the Blocks theme the same way, so they are not valid supported versions.
+webui = ["gradio>=5.50.0,<7"]
 # Development tools
 dev = ["ruff>=0.4.0", "pytest>=8.0.0"]
 # All optional dependencies (except docs/dev/webui)

@@ -115,6 +115,30 @@ disabled. Read-only Ask-mode rollouts may explicitly disable it. Override the
 executable or sandbox through `model.cursor_exec_path` and
 `model.cursor_exec_sandbox`.
 
+To train or evaluate with the Claude Code CLI execution harness (`claude_code_exec`):
+
+```bash
+# Target-only rollout through Claude Code (optimizer defaults to configured chat backend):
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --backend claude_code_exec
+
+# Explicitly drive both target and optimizer roles with Claude Code:
+python scripts/train.py \
+  --config configs/searchqa/default.yaml \
+  --cfg-options \
+    model.optimizer_backend=claude_code_exec \
+    model.target_backend=claude_code_exec
+```
+
+When `claude_code_exec` is selected as the target backend, SkillOpt streams SDK
+messages from the Claude Code process and parses text, tool calls, and tool
+results into structured trace steps (`claude_trace_steps.txt`). When
+`model.claude_trace_to_optimizer` is enabled (`true` by default), these trace
+steps are injected into the reflection prompt so the optimizer can inspect the
+agent's intermediate actions.
+
+
 ## SkillOpt-Sleep
 
 ```bash
@@ -123,8 +147,12 @@ skillopt-sleep <action> [options]
 python -m skillopt_sleep <action> [options]
 ```
 
-Actions are `run`, `dry-run`, `status`, `adopt`, `harvest`, `schedule`, and
-`unschedule`. Common options include:
+Actions are `run`, `dry-run`, `status`, `adopt`, `harvest`, `schedule`,
+`unschedule`, and `evalkit`. `evalkit` is also available as
+`python -m skillopt_sleep.evalkit` and compares two conditions on one fixed
+task manifest (McNemar + bootstrap CI). Exactly one of its `--b` comparison
+input or `--aa` identity-check flag is required. See `docs/sleep/evalkit.md`.
+Common options for the nightly actions include:
 
 | Argument | Description |
 |---|---|

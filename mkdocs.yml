@@ -50,6 +50,7 @@ nav:
     - Deep Learning Analogy: guide/dl-analogy.md
   - SkillOpt-Sleep:
     - Overview: sleep/README.md
+    - Paired A/B Evalkit: sleep/evalkit.md
     - Multi-skill Staging: sleep/multi-skill-staging.md
     - OpenAI-compatible Endpoints: sleep/openai-compatible-endpoints.md
     - Results: sleep/RESULTS.md
@@ -62,6 +63,7 @@ nav:
     - CLI Reference: reference/cli.md
     - API Reference: reference/api.md
   - Contributing: contributing.md
+  - Code Review Guidelines: review_guidelines.md
 
 markdown_extensions:
   - admonition

@@ -56,7 +56,7 @@ def test_explicit_pi_source_routes_only_to_pi_harvester():
 
     assert actual == expected
     pi.assert_called_once_with(
-        "/tmp/pi-home/agent/sessions",
+        cfg.pi_sessions_dir,
         scope="invoked",
         invoked_project="/repo/project",
         since_iso="2026-01-01T00:00:00Z",

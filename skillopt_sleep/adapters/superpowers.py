@@ -717,7 +717,7 @@ def _run_scenario(
             if p.is_symlink():
                 raise ValueError(f"Refusing symlinked overlay path: {p}")
         skill_dir.mkdir(parents=True, exist_ok=True)
-        if not skill_dir.resolve().is_relative_to(workspace):
+        if not skill_dir.resolve().is_relative_to(workspace.resolve()):
             raise ValueError(f"Skill path {skill_dir} escapes workspace {workspace}")
         shutil.copy2(skill_overlay, skill_dest, follow_symlinks=False)
 

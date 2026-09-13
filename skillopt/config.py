@@ -221,12 +221,20 @@ def _resolve_layer_format_duplicates(cfg: dict) -> None:
     """Prefer canonical structured keys over equivalent flat keys in a layer."""
     for dotted, flat_key in _FLATTEN_MAP.items():
         if _nested_key_present(cfg, dotted):
+            # `env.name -> env` maps onto the section name itself: popping it
+            # would delete the whole env section. Skip that case.
+            if flat_key == dotted.split(".", 1)[0]:
+                continue
             cfg.pop(flat_key, None)
 
 
 def _drop_base_keys_overridden_by_layer(base: dict, override: dict) -> None:
     """Honor child precedence when inheritance mixes flat and structured YAML."""
     for dotted, flat_key in _FLATTEN_MAP.items():
+        if flat_key == dotted.split(".", 1)[0]:
+            # `env.name -> env` maps onto the section name itself: dropping
+            # it would delete the whole section instead of one key.
+            continue
         if flat_key in override or _nested_key_present(override, dotted):
             base.pop(flat_key, None)
             _remove_nested_key(base, dotted)
