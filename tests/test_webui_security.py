@@ -260,3 +260,85 @@ def test_main_rejects_incomplete_env_auth_pass_only(webui, monkeypatch):
     with pytest.raises(SystemExit):
         webui_mod.main()
     launcher.assert_not_called()
+
+
+@pytest.fixture
+def auth_probe(webui, monkeypatch):
+    """Run the real ``main()`` with a mocked UI and report what it launched.
+
+    Returns ``(launcher, exit_code)``, where ``exit_code`` is ``None`` when
+    ``main()`` returned normally and the ``SystemExit`` code otherwise, so a
+    test can tell "refused to start" from "started without auth".
+    """
+    def _run(argv=(), env=None):
+        launcher = mock.MagicMock()
+        app_mock = mock.MagicMock()
+        app_mock.launch = launcher
+        monkeypatch.setattr(webui, "build_ui", lambda: app_mock)
+        monkeypatch.setattr(sys, "argv", ["app.py", *argv])
+        for name in ("SKILLOPT_WEBUI_USER", "SKILLOPT_WEBUI_PASS"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in (env or {}).items():
+            monkeypatch.setenv(name, value)
+        code = None
+        try:
+            webui.main()
+        except SystemExit as exc:
+            code = exc.code
+        return launcher, code
+
+    return _run
+
+
+def test_main_auth_matrix_launches_with_complete_configuration(auth_probe):
+    """CLI-only, env-only and field-mixed sources must each enable auth."""
+    for argv, env, expected in (
+        (["--auth-user", "admin", "--auth-pass", "s3cret"], {}, ("admin", "s3cret")),
+        (
+            [],
+            {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": "envpass"},
+            ("envuser", "envpass"),
+        ),
+        (["--auth-user", "admin"], {"SKILLOPT_WEBUI_PASS": "envpass"}, ("admin", "envpass")),
+    ):
+        launcher, code = auth_probe(argv, env)
+
+        assert code is None, f"complete configuration must launch: {argv} {env}"
+        assert launcher.call_args.kwargs.get("auth") == expected
+
+
+def test_main_cli_credentials_take_precedence_over_env(auth_probe):
+    """Precedence is per field: an explicit flag wins over its variable."""
+    launcher, code = auth_probe(
+        ["--auth-user", "cli", "--auth-pass", "clipass"],
+        {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": "envpass"},
+    )
+
+    assert code is None
+    assert launcher.call_args.kwargs["auth"] == ("cli", "clipass")
+
+
+@pytest.mark.parametrize(
+    "argv, env",
+    [
+        # absent: a username with no password anywhere
+        (["--auth-user", "admin"], {}),
+        (["--auth-pass", "s3cret"], {}),
+        ([], {"SKILLOPT_WEBUI_USER": "envuser"}),
+        ([], {"SKILLOPT_WEBUI_PASS": "envpass"}),
+        (["--auth-user", "admin"], {"SKILLOPT_WEBUI_USER": "envuser"}),
+        # configured but blank: must not read as "no authentication requested"
+        (["--auth-user", "", "--auth-pass", ""], {}),
+        ([], {"SKILLOPT_WEBUI_USER": "", "SKILLOPT_WEBUI_PASS": ""}),
+        (["--auth-user", ""], {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": "envpass"}),
+        ([], {"SKILLOPT_WEBUI_USER": "   ", "SKILLOPT_WEBUI_PASS": "envpass"}),
+        ([], {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": ""}),
+    ],
+)
+def test_main_rejects_invalid_auth_configuration(auth_probe, capsys, argv, env):
+    """Incomplete or blank configuration must stop before the UI launches."""
+    launcher, code = auth_probe(argv, env)
+
+    assert code == 1
+    launcher.assert_not_called()
+    assert "authentication" in capsys.readouterr().err.lower()

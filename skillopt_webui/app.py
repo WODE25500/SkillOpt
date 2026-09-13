@@ -717,6 +717,44 @@ def build_launch_kwargs(server_name: str, server_port: int, share: bool) -> dict
     return kwargs
 
 
+def resolve_auth(auth_user, auth_pass, env=None):
+    """Resolve basic-auth credentials from the CLI flags and the environment.
+
+    Returns ``(user, password)`` when authentication is configured, or ``None``
+    for a deliberately unconfigured local run. Raises ``ValueError`` when a
+    configuration is present but invalid.
+
+    Precedence is per field: a flag supplied on the command line wins over its
+    environment variable. "Not supplied" and "supplied but blank" are different
+    states, because treating them as the same one fails open - ``--auth-user
+    ""`` must not quietly fall back to ``SKILLOPT_WEBUI_USER``, and a pair of
+    blank variables (an empty secret, a template that was never filled in) must
+    not read as "no authentication requested" when the operator meant to
+    require login.
+    """
+    env = os.environ if env is None else env
+
+    def pick(cli_value, env_name, flag):
+        if cli_value is not None:
+            return cli_value, flag
+        if env_name in env:
+            return env[env_name], env_name
+        return None, None
+
+    user, user_src = pick(auth_user, "SKILLOPT_WEBUI_USER", "--auth-user")
+    password, password_src = pick(auth_pass, "SKILLOPT_WEBUI_PASS", "--auth-pass")
+
+    if user_src is None and password_src is None:
+        return None
+    if user_src is None or password_src is None:
+        missing = "--auth-pass" if user_src is not None else "--auth-user"
+        raise ValueError(f"{user_src or password_src} is set but {missing} is not")
+    for value, src in ((user, user_src), (password, password_src)):
+        if not value.strip():
+            raise ValueError(f"{src} is blank")
+    return (user, password)
+
+
 def main():
     parser = argparse.ArgumentParser(description="SkillOpt WebUI")
     parser.add_argument("--port", type=int, default=7860)
@@ -749,20 +787,21 @@ def main():
             file=sys.stderr,
         )
 
-    auth_user = args.auth_user or os.environ.get("SKILLOPT_WEBUI_USER")
-    auth_pass = args.auth_pass or os.environ.get("SKILLOPT_WEBUI_PASS")
-    # Fail-closed: authentication requires BOTH credentials. Supplying only a
-    # username or only a password must not silently launch the UI unauthenticated
-    # (a deployment could expose the training controls without login).
-    if bool(auth_user) != bool(auth_pass):
+    # Fail-closed: authentication requires BOTH credentials, from any source.
+    # Supplying only one of them - or supplying blank ones - must not silently
+    # launch the UI unauthenticated (a deployment could expose the training
+    # controls without login).
+    try:
+        auth = resolve_auth(args.auth_user, args.auth_pass)
+    except ValueError as exc:
         print(
-            "SKILLOPT_WEBUI authentication requires BOTH --auth-user and "
-            "--auth-pass (or SKILLOPT_WEBUI_USER and SKILLOPT_WEBUI_PASS). "
-            "Refusing to start with incomplete credentials.",
+            f"SKILLOPT_WEBUI authentication is misconfigured: {exc}. Provide both "
+            "--auth-user and --auth-pass (or both SKILLOPT_WEBUI_USER and "
+            "SKILLOPT_WEBUI_PASS) to require login, or neither to run without "
+            "authentication. Refusing to start.",
             file=sys.stderr,
         )
         sys.exit(1)
-    auth = (auth_user, auth_pass) if auth_user else None
 
     app = build_ui()
     launch_kwargs = build_launch_kwargs(args.host, args.port, args.share)
