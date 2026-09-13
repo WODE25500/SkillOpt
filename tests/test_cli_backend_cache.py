@@ -243,6 +243,43 @@ def test_dual_backend_token_delta_returns_target():
     assert db.token_delta() == target.token_delta()
 
 
+def test_dual_backend_modern_target_parallel_replay_is_call_local():
+    """Parallel replay through a DualBackend over a modern target keeps each
+    result's cost on its own task.
+
+    ``token_delta()`` delegates to a target that has a thread-local delta, so
+    this combination is safe to share across workers. The cumulative-only
+    fallback is a different case and is deliberately not asserted here.
+    """
+    from skillopt_sleep.replay import replay_batch
+
+    tasks = [
+        TaskRecord(
+            id=f"t{i}",
+            project="p1",
+            intent=f"intent-{i}-" + "x" * (25 * i),
+            reference_kind="exact",
+            reference="resp:ok",
+        )
+        for i in range(8)
+    ]
+
+    def costs(workers: int) -> dict[str, int]:
+        backend = DualBackend(target=_EchoBackend(), optimizer=_EchoBackend())
+        return {
+            t.id: r.tokens
+            for t, r in replay_batch(backend, tasks, "skill", "memory", workers=workers)
+        }
+
+    sequential = costs(1)
+    parallel = costs(4)
+
+    assert len(set(sequential.values())) > 1, (
+        "tasks must differ in cost, otherwise this check proves nothing"
+    )
+    assert parallel == sequential, "parallel workers leaked call-local cost across tasks"
+
+
 def test_attempt_with_tools_sets_call_local_delta(monkeypatch):
     """Tool-aware replay must set the thread-local delta so replay_one() sees
     real call-local usage instead of falling back to a response-length estimate."""

@@ -2263,9 +2263,18 @@ class DualBackend(Backend):
         self.optimizer = optimizer
         self.name = f"target={target.name}/optimizer={optimizer.name}"
         # NOTE: `_target_tokens_before` (snapshotted in attempt/attempt_with_tools
-        # below) is a SHARED instance attribute, not thread-local. Do NOT share one
-        # DualBackend across parallel replay workers (SKILLOPT_SLEEP_WORKERS>1): the
-        # before/after snapshot would race. Give each worker its own DualBackend.
+        # below) is a SHARED instance attribute, not thread-local, and only the
+        # cumulative-only fallback in token_delta() reads it.
+        #
+        # Concurrency contract (replay_batch()'s docstring has the full table):
+        # * a target with token_delta() -> token_delta() returns that target's
+        #   thread-local, call-local delta, so one DualBackend is safe to share
+        #   across parallel replay workers;
+        # * a target with only tokens_used() -> token_delta() falls back to the
+        #   shared snapshot above, which races when workers overlap. Give each
+        #   worker its own DualBackend, or keep SKILLOPT_SLEEP_WORKERS=1.
+        # The cumulative-only fallback is supported sequentially. Do not read the
+        # sequential compatibility tests as a thread-safety guarantee for it.
 
     def attempt(self, task, skill, memory, sample_id: int = 0):
         # Snapshot the target total before the attempt so token_delta() can report
@@ -2307,7 +2316,8 @@ class DualBackend(Backend):
         # Compatibility: a target that only implements the older tokens_used()
         # contract has no per-call delta. Report its same-thread before/after
         # difference (snapshotted in attempt/attempt_with_tools) so the per-attempt
-        # cost is not silently replaced by a text-length estimate.
+        # cost is not silently replaced by a text-length estimate. The snapshot is
+        # shared instance state, so this branch is sequential-only - see __init__.
         return max(0, self.target.tokens_used() - getattr(self, "_target_tokens_before", 0))
 
 

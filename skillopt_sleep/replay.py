@@ -46,13 +46,16 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
     else:
         response = backend.attempt(task, skill, memory, sample_id=sample_id)
     latency_ms = (time.time() - t0) * 1000.0
-    # Call-local token accounting (thread-safe under parallel replay): prefer the
-    # backend's per-call delta (CliBackend/DualBackend use a thread-local delta).
-    # That method reports exact cost, including a known zero for a cache hit, so
-    # no text-length estimate is substituted. A backend that only implements the
-    # older tokens_used() contract has no per-call delta, so use its same-thread
-    # before/after difference and fall back to a length estimate only when it
-    # reports no tracking (zero) at all.
+    # Call-local token accounting: prefer the backend's per-call delta. For
+    # CliBackend - and for a DualBackend whose target has one - that delta lives
+    # in thread-local storage and is exact, including a known zero for a cache
+    # hit, so no text-length estimate is substituted. A backend that only
+    # implements the older tokens_used() contract has no per-call delta, so use
+    # its same-thread before/after difference: call-local because the snapshot is
+    # taken on this worker's own thread. Fall back to a length estimate only when
+    # it reports no tracking (zero) at all. Note that DualBackend's own fallback
+    # is NOT call-local - see replay_batch() for which combinations are safe to
+    # share across workers.
     if token_delta_fn is not None:
         tokens = token_delta_fn()
     else:
@@ -114,6 +117,27 @@ def replay_batch(
     big test sets (like the research harness's --workers). ``workers`` defaults
     to env SKILLOPT_SLEEP_WORKERS or 1 (sequential). Mock stays sequential
     (deterministic) unless asked otherwise.
+
+    Every worker shares the one ``backend`` passed in, so per-call token
+    accounting has to be call-local. Which combinations support that:
+
+    * ``CliBackend`` and subclasses - per-call delta in thread-local storage,
+      safe to share across workers.
+    * ``DualBackend`` whose target defines ``token_delta()`` - reports that
+      target's thread-local delta, safe to share across workers.
+    * a bare backend with only the older ``tokens_used()`` contract - the
+      before/after snapshot is taken in ``replay_one`` on the worker's own
+      thread, safe to share across workers.
+    * ``DualBackend`` whose target only has ``tokens_used()`` - NOT safe to
+      share: its before/after snapshot lives on the DualBackend instance, so
+      parallel attempts overwrite each other's baseline. Give each worker its
+      own DualBackend, or keep ``workers=1`` for this combination.
+
+    The last row is why this is written down: the legacy fallback is call-local
+    in ``replay_one`` but not inside ``DualBackend``, so "legacy backends are
+    fine" does not generalize to a legacy target behind a DualBackend. That
+    combination is supported sequentially and covered by tests there; it is not
+    covered, and not claimed, under parallel replay.
     """
     if workers <= 0:
         workers = int(os.environ.get("SKILLOPT_SLEEP_WORKERS", "1") or "1")
