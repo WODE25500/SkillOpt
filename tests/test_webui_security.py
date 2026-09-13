@@ -266,15 +266,18 @@ def test_main_rejects_incomplete_env_auth_pass_only(webui, monkeypatch):
 def auth_probe(webui, monkeypatch):
     """Run the real ``main()`` with a mocked UI and report what it launched.
 
-    Returns ``(launcher, exit_code)``, where ``exit_code`` is ``None`` when
-    ``main()`` returned normally and the ``SystemExit`` code otherwise, so a
-    test can tell "refused to start" from "started without auth".
+    Returns ``(launcher, exit_code, builder)``, where ``exit_code`` is ``None``
+    when ``main()`` returned normally and the ``SystemExit`` code otherwise, so
+    a test can tell "refused to start" from "started without auth". ``builder``
+    is the mocked ``build_ui``, so a rejection test can also assert the UI was
+    never constructed at all rather than only that it was not launched.
     """
     def _run(argv=(), env=None):
         launcher = mock.MagicMock()
         app_mock = mock.MagicMock()
         app_mock.launch = launcher
-        monkeypatch.setattr(webui, "build_ui", lambda: app_mock)
+        builder = mock.MagicMock(return_value=app_mock)
+        monkeypatch.setattr(webui, "build_ui", builder)
         monkeypatch.setattr(sys, "argv", ["app.py", *argv])
         for name in ("SKILLOPT_WEBUI_USER", "SKILLOPT_WEBUI_PASS"):
             monkeypatch.delenv(name, raising=False)
@@ -285,7 +288,7 @@ def auth_probe(webui, monkeypatch):
             webui.main()
         except SystemExit as exc:
             code = exc.code
-        return launcher, code
+        return launcher, code, builder
 
     return _run
 
@@ -301,7 +304,7 @@ def test_main_auth_matrix_launches_with_complete_configuration(auth_probe):
         ),
         (["--auth-user", "admin"], {"SKILLOPT_WEBUI_PASS": "envpass"}, ("admin", "envpass")),
     ):
-        launcher, code = auth_probe(argv, env)
+        launcher, code, _builder = auth_probe(argv, env)
 
         assert code is None, f"complete configuration must launch: {argv} {env}"
         assert launcher.call_args.kwargs.get("auth") == expected
@@ -309,7 +312,7 @@ def test_main_auth_matrix_launches_with_complete_configuration(auth_probe):
 
 def test_main_cli_credentials_take_precedence_over_env(auth_probe):
     """Precedence is per field: an explicit flag wins over its variable."""
-    launcher, code = auth_probe(
+    launcher, code, _builder = auth_probe(
         ["--auth-user", "cli", "--auth-pass", "clipass"],
         {"SKILLOPT_WEBUI_USER": "envuser", "SKILLOPT_WEBUI_PASS": "envpass"},
     )
@@ -337,8 +340,9 @@ def test_main_cli_credentials_take_precedence_over_env(auth_probe):
 )
 def test_main_rejects_invalid_auth_configuration(auth_probe, capsys, argv, env):
     """Incomplete or blank configuration must stop before the UI launches."""
-    launcher, code = auth_probe(argv, env)
+    launcher, code, builder = auth_probe(argv, env)
 
     assert code == 1
+    assert builder.call_count == 0, "the UI must not be built when auth is invalid"
     launcher.assert_not_called()
     assert "authentication" in capsys.readouterr().err.lower()
