@@ -248,10 +248,25 @@ def test_dual_backend_modern_target_parallel_replay_is_call_local():
     result's cost on its own task.
 
     ``token_delta()`` delegates to a target that has a thread-local delta, so
-    this combination is safe to share across workers. The cumulative-only
-    fallback is a different case and is deliberately not asserted here.
+    this combination is safe to share across workers; the cumulative-only
+    fallbacks are a different case and are deliberately not asserted here.
+
+    The target holds every worker inside the call, so the spends really do
+    overlap: without that, a backend that lost its thread-locality would still
+    pass by never racing.
     """
     from skillopt_sleep.replay import replay_batch
+
+    class _OverlappingBackend(_EchoBackend):
+        """Blocks until every worker is in flight before spending tokens."""
+
+        def __init__(self, parties: int) -> None:
+            super().__init__()
+            self._barrier = threading.Barrier(parties, timeout=15)
+
+        def attempt(self, task, skill, memory, sample_id: int = 0):
+            self._barrier.wait()
+            return super().attempt(task, skill, memory, sample_id=sample_id)
 
     tasks = [
         TaskRecord(
@@ -261,18 +276,20 @@ def test_dual_backend_modern_target_parallel_replay_is_call_local():
             reference_kind="exact",
             reference="resp:ok",
         )
-        for i in range(8)
+        for i in range(4)
     ]
 
     def costs(workers: int) -> dict[str, int]:
-        backend = DualBackend(target=_EchoBackend(), optimizer=_EchoBackend())
+        backend = DualBackend(
+            target=_OverlappingBackend(workers), optimizer=_EchoBackend()
+        )
         return {
             t.id: r.tokens
             for t, r in replay_batch(backend, tasks, "skill", "memory", workers=workers)
         }
 
     sequential = costs(1)
-    parallel = costs(4)
+    parallel = costs(2)
 
     assert len(set(sequential.values())) > 1, (
         "tasks must differ in cost, otherwise this check proves nothing"

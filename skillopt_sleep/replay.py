@@ -51,11 +51,11 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
     # in thread-local storage and is exact, including a known zero for a cache
     # hit, so no text-length estimate is substituted. A backend that only
     # implements the older tokens_used() contract has no per-call delta, so use
-    # its same-thread before/after difference: call-local because the snapshot is
-    # taken on this worker's own thread. Fall back to a length estimate only when
-    # it reports no tracking (zero) at all. Note that DualBackend's own fallback
-    # is NOT call-local - see replay_batch() for which combinations are safe to
-    # share across workers.
+    # its before/after difference. That difference is only call-local while the
+    # backend is used sequentially: the counter is shared, so an overlapping
+    # worker's spend lands in it too. Fall back to a length estimate only when
+    # the backend reports no tracking (zero) at all. See replay_batch() for which
+    # combinations are safe to share across workers.
     if token_delta_fn is not None:
         tokens = token_delta_fn()
     else:
@@ -125,19 +125,21 @@ def replay_batch(
       safe to share across workers.
     * ``DualBackend`` whose target defines ``token_delta()`` - reports that
       target's thread-local delta, safe to share across workers.
-    * a bare backend with only the older ``tokens_used()`` contract - the
-      before/after snapshot is taken in ``replay_one`` on the worker's own
-      thread, safe to share across workers.
-    * ``DualBackend`` whose target only has ``tokens_used()`` - NOT safe to
-      share: its before/after snapshot lives on the DualBackend instance, so
-      parallel attempts overwrite each other's baseline. Give each worker its
-      own DualBackend, or keep ``workers=1`` for this combination.
+    * a bare backend with only the older ``tokens_used()`` contract - sequential
+      only: ``replay_one`` differences a counter the other workers are also
+      spending, so an overlapping worker's tokens are counted into this task.
+    * ``DualBackend`` whose target only has ``tokens_used()`` - sequential only,
+      for that reason plus a baseline that lives on the shared DualBackend.
 
-    The last row is why this is written down: the legacy fallback is call-local
-    in ``replay_one`` but not inside ``DualBackend``, so "legacy backends are
-    fine" does not generalize to a legacy target behind a DualBackend. That
-    combination is supported sequentially and covered by tests there; it is not
-    covered, and not claimed, under parallel replay.
+    Only a thread-local per-call delta is safe to share. Everything built on a
+    cumulative total - the bare legacy backend as much as the DualBackend
+    fallback - over-counts when workers overlap: a 37-token attempt reported 74
+    with two workers, because one worker's spend landed in the other's
+    difference. Over-counting is the failure direction, so token and cost
+    budgets see more spend than actually happened. Both shapes are supported
+    sequentially and covered by tests there; neither is claimed here. Use
+    ``workers=1``, or a backend that reports a per-call delta, when the
+    accounting has to be exact.
     """
     if workers <= 0:
         workers = int(os.environ.get("SKILLOPT_SLEEP_WORKERS", "1") or "1")
