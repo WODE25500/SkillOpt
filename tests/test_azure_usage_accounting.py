@@ -17,10 +17,17 @@ from unittest import mock
 from skillopt_sleep.backend import AzureOpenAIBackend, AzureResponsesBackend, OpenCodeCliBackend
 
 
+_UNSET = object()
+
+
 class _ChatResp:
-    def __init__(self, text, prompt_tokens, completion_tokens):
+    def __init__(self, text, prompt_tokens=None, completion_tokens=None, usage=_UNSET):
         self.choices = [SimpleNamespace(message=SimpleNamespace(content=text))]
-        self.usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+        if usage is _UNSET:
+            usage = SimpleNamespace(
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+            )
+        self.usage = usage
 
 
 class _FakeChatClient:
@@ -39,9 +46,13 @@ class _FakeChatClient:
 
 
 class _ResponsesResp:
-    def __init__(self, text, input_tokens, output_tokens):
+    def __init__(self, text, input_tokens=None, output_tokens=None, usage=_UNSET):
         self.output_text = text
-        self.usage = SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+        if usage is _UNSET:
+            usage = SimpleNamespace(
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
+        self.usage = usage
 
 
 class _FakeResponsesClient:
@@ -168,3 +179,79 @@ def test_azure_chat_paid_empty_then_terminal_error_keeps_usage():
     assert out == ""
     assert be._tokens == 7, f"expected paid usage 7, got {be._tokens}"
     assert be.token_delta() == 7, f"expected call-local delta 7, got {be.token_delta()}"
+
+
+# --- unknown-vs-zero usage: a missing usage block must not read as a free call ---
+
+
+def test_azure_chat_success_without_usage_uses_length_estimate():
+    """usage=None on a successful response must charge the len//4 estimate.
+
+    Reviewed defect: the backend flipped charged_in_call=True even when the SDK
+    response carried no usage, so both the aggregate and the call-local delta
+    became 0. Repro shape: 400-char prompt, 40-char reply, main = 110 tokens.
+    """
+    be = _azure_chat([_ChatResp("y" * 40, usage=None)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == "y" * 40
+    assert be._tokens == 400 // 4 + 40 // 4, f"expected estimate 110, got {be._tokens}"
+    assert be.token_delta() == 110
+
+
+def test_azure_responses_success_without_usage_uses_length_estimate():
+    be = _azure_responses([_ResponsesResp("y" * 40, usage=None)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == "y" * 40
+    assert be._tokens == 110, f"expected estimate 110, got {be._tokens}"
+    assert be.token_delta() == 110
+
+
+def test_azure_chat_usage_stub_without_counts_uses_length_estimate():
+    """A usage object whose token fields are all None carries no information."""
+    be = _azure_chat([
+        _ChatResp("y" * 40, usage=SimpleNamespace(prompt_tokens=None, completion_tokens=None)),
+    ])
+    with mock.patch("time.sleep"):
+        be._cached_call("k:1", "x" * 400)
+    assert be._tokens == 110
+    assert be.token_delta() == 110
+
+
+def test_azure_chat_reported_zero_usage_is_authoritative():
+    """A reported zero must stay zero — the estimate must NOT be substituted."""
+    be = _azure_chat([_ChatResp("ok", 0, 0)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == "ok"
+    assert be._tokens == 0, f"reported zero was overridden: {be._tokens}"
+    assert be.token_delta() == 0
+
+
+def test_azure_responses_reported_zero_usage_is_authoritative():
+    be = _azure_responses([_ResponsesResp("ok", 0, 0)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == "ok"
+    assert be._tokens == 0, f"reported zero was overridden: {be._tokens}"
+    assert be.token_delta() == 0
+
+
+def test_azure_chat_keeps_known_partial_retry_usage():
+    """A paid empty attempt keeps its usage even when the later success reports none."""
+    be = _azure_chat([_ChatResp("", 7, 0), _ChatResp("ok", usage=None)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "hello")
+    assert out == "ok"
+    assert be._tokens == 7, f"known partial retry usage lost: {be._tokens}"
+    assert be.token_delta() == 7
+
+
+def test_azure_responses_keeps_known_partial_retry_usage():
+    be = _azure_responses([_ResponsesResp("", 5, 0), _ResponsesResp("ok", usage=None)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "hello")
+    assert out == "ok"
+    assert be._tokens == 5, f"known partial retry usage lost: {be._tokens}"
+    assert be.token_delta() == 5

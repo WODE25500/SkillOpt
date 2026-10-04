@@ -2423,6 +2423,31 @@ class AzureOpenAIBackend(CliBackend):
             raw[:100])
         return None
 
+    @staticmethod
+    def _usage_tokens(usage, *, input_field: str, output_field: str) -> Optional[int]:
+        """Provider-reported token total, or ``None`` when usage is unavailable.
+
+        "The provider told us nothing" and "the provider told us zero" are
+        different facts and must not collapse into the same 0. A usage object
+        that carries no token counts (``usage=None``, as some SDK responses
+        leave it, or a stub whose fields are all None) yields ``None`` so the
+        caller keeps the ``len//4`` estimate; a usage object that reports ``0``
+        is authoritative and is charged as exactly zero.
+        """
+        if usage is None:
+            return None
+        raw_in = getattr(usage, input_field, None)
+        raw_out = getattr(usage, output_field, None)
+        if raw_in is None and raw_out is None:
+            return None
+
+        def _as_int(value) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return 0
+            return int(value)
+
+        return _as_int(raw_in) + _as_int(raw_out)
+
     def _is_azure_host(self) -> bool:
         from urllib.parse import urlparse
         parsed = urlparse(self.endpoint)
@@ -2486,6 +2511,7 @@ class AzureOpenAIBackend(CliBackend):
         last_exc = None
         n_attempts = max(1, retries)
         usage_total = 0
+        usage_reported = False
         for attempt in range(n_attempts):
             try:
                 kwargs: Dict[str, Any] = {
@@ -2506,17 +2532,26 @@ class AzureOpenAIBackend(CliBackend):
                     kwargs["extra_body"] = self.chat_extra_body
                 resp = client.chat.completions.create(**kwargs)
                 text = (resp.choices[0].message.content or "").strip()
-                try:
-                    u = resp.usage
-                    usage_total += (getattr(u, "prompt_tokens", 0) or 0) + (getattr(u, "completion_tokens", 0) or 0)
-                except Exception:
-                    pass
+                reported = self._usage_tokens(
+                    getattr(resp, "usage", None),
+                    input_field="prompt_tokens",
+                    output_field="completion_tokens",
+                )
+                if reported is not None:
+                    usage_reported = True
+                    usage_total += reported
                 if text:
                     # A recovered retry must not leave a stale error behind:
                     # last_call_error always reflects the LATEST outcome.
                     self.last_call_error = ""
-                    self._record_delta(usage_total)
-                    self._thread_local.charged_in_call = True
+                    if usage_reported:
+                        self._record_delta(usage_total)
+                        self._thread_local.charged_in_call = True
+                    else:
+                        # No attempt carried provider usage: leave the marker
+                        # clear so _cached_call's len//4 estimate stands in.
+                        # Reporting a bare 0 here would read as a free call.
+                        self._thread_local.charged_in_call = False
                     return text
                 # empty but no exception: model genuinely returned nothing — one
                 # quick retry can help (reasoning models occasionally yield empty)
@@ -2614,6 +2649,7 @@ class AzureResponsesBackend(AzureOpenAIBackend):
         base_ep = self._next_endpoint()           # this call's primary endpoint
         base_idx = self.endpoints.index(base_ep)
         usage_total = 0
+        usage_reported = False
         for attempt in range(max(1, retries)):
             # on retry, fail over to the other endpoint(s)
             ep = self.endpoints[(base_idx + attempt) % len(self.endpoints)]
@@ -2624,14 +2660,22 @@ class AzureResponsesBackend(AzureOpenAIBackend):
                     max_output_tokens=16384,
                 )
                 text = (getattr(resp, "output_text", "") or "").strip()
-                try:
-                    u = resp.usage
-                    usage_total += (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "output_tokens", 0) or 0)
-                except Exception:
-                    pass
+                reported = self._usage_tokens(
+                    getattr(resp, "usage", None),
+                    input_field="input_tokens",
+                    output_field="output_tokens",
+                )
+                if reported is not None:
+                    usage_reported = True
+                    usage_total += reported
                 if text:
-                    self._record_delta(usage_total)
-                    self._thread_local.charged_in_call = True
+                    if usage_reported:
+                        self._record_delta(usage_total)
+                        self._thread_local.charged_in_call = True
+                    else:
+                        # Provider usage unavailable for this call: keep the
+                        # len//4 estimate in charge instead of a false zero.
+                        self._thread_local.charged_in_call = False
                     return text
                 last = "empty-response"
             except Exception as e:  # noqa: BLE001
