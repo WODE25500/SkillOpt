@@ -15,6 +15,7 @@ from skillopt_sleep.harvest import (
     _is_meta_prompt,
     _iter_jsonl,
     _project_matches,
+    _safe_mtime,
 )
 from skillopt_sleep.staging import _SECRET_PATTERNS
 from skillopt_sleep.types import SessionDigest
@@ -216,7 +217,7 @@ def harvest_codex(
         for fn in os.listdir(archived_sessions_dir)
         if fn.endswith(".jsonl")
     ]
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    paths.sort(key=_safe_mtime, reverse=True)
 
     project_hint = invoked_project if scope == "invoked" else ""
     for path in paths:

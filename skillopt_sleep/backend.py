@@ -125,6 +125,31 @@ def keyword_soft_score(reference: str, response: str) -> float:
     return hit / len(set(ref_tokens))
 
 
+def _optimizer_feedback(task: TaskRecord, result: ReplayResult) -> str:
+    """Return learning-safe feedback while retaining raw evidence elsewhere.
+
+    Recompute semantic rule-judge feedback for legacy/deserialized results that
+    predate ``ReplayResult.optimizer_feedback``. This makes every reflection
+    path safe even when callers construct ReplayResult objects themselves.
+    """
+    if task.reference_kind == "rule" and task.judge:
+        from skillopt_sleep.judges import score_rule_judge_with_feedback
+
+        _hard, _soft, _rationale, feedback = score_rule_judge_with_feedback(
+            task.judge,
+            getattr(result, "response", ""),
+            getattr(result, "tools_called", []),
+        )
+        return feedback
+    feedback = getattr(result, "optimizer_feedback", "")
+    if isinstance(feedback, str) and feedback:
+        return feedback
+    # Legacy results for non-rule judges cannot be safely projected: their raw
+    # rationale may mix semantic guidance with grader internals. Fail closed
+    # rather than feeding that evidence back into an optimizer prompt.
+    return "The response did not satisfy the task's evaluation criteria."
+
+
 # ── Mock backend (deterministic, no API) ──────────────────────────────────────
 
 class MockBackend(Backend):
@@ -512,49 +537,25 @@ class CliBackend(Backend):
         target = "skill" if evolve_skill else "memory"
         cur_doc = (skill if target == "skill" else memory) or "(empty)"
         fail_text = "\n".join(
-            f"- wanted: {t.intent[:160]}\n  got: {r.response[:160]}\n  why-wrong: {r.fail_reason[:160]}"
+            f"- wanted: {t.intent[:160]}\n  got: {r.response[:160]}\n"
+            f"  actionable-feedback: {_optimizer_feedback(t, r)[:240]}"
             for t, r in failures[:8]
         )
-        # Aggregate the most common failing criteria across all failures so the
-        # optimizer is told *exactly what the scorer rewards* — gbrain's lesson:
-        # the optimizer kept proposing reasonable-but-wrong edits until it could
-        # see the success criteria.
+        # Aggregate semantic requirements, never raw verifier syntax. Exact
+        # regexes/check expressions stay in ReplayResult.fail_reason and the
+        # evidence log for audit, but are not instructions to the optimizer.
         from collections import Counter
         crit = Counter()
-        for _t, r in failures:
-            fr = r.fail_reason or ""
-            if fr.startswith("failed:"):
-                for part in fr[len("failed:"):].split(","):
-                    part = part.strip()
-                    if part:
-                        crit[part] += 1
-
-        def _explain(c: str) -> str:
-            # translate an "op=arg" criterion into a plain-English requirement
-            if "=" in c:
-                op, _, arg = c.partition("=")
-                op = op.strip(); arg = arg.strip()
-                if op == "max_chars":
-                    return f"the ENTIRE response must be at most {arg} characters long"
-                if op == "min_chars":
-                    return f"the response must be at least {arg} characters long"
-                if op == "section_present":
-                    return f"the response must contain a section/heading titled '{arg}'"
-                if op == "section_contains":
-                    return f"a markdown heading must contain the text '{arg}'"
-                if op == "regex":
-                    return f"the response must match the pattern /{arg}/ (e.g. include that label)"
-                if op == "contains":
-                    return f"the response must contain the text '{arg}'"
-                if op == "tool_called":
-                    return f"the agent must actually call the '{arg}' tool"
-            return c
+        for t, r in failures:
+            feedback = _optimizer_feedback(t, r).strip()
+            if feedback:
+                crit[feedback] += 1
 
         criteria_text = ""
         if crit:
             criteria_text = (
-                "\n# Exact criteria the outputs are FAILING (fix these directly)\n"
-                + "\n".join(f"- {_explain(c)}  [{c}, failed {n}x]" for c, n in crit.most_common())
+                "\n# Actionable semantic feedback (fix the behavior, not the verifier)\n"
+                + "\n".join(f"- {c} (observed {n}x)" for c, n in crit.most_common())
             )
         pref_text = ""
         if getattr(self, "preferences", ""):

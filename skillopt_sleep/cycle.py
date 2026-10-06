@@ -988,8 +988,24 @@ def run_sleep_cycle(
     adopted_paths: List[str] = []
     if not dry_run:
         _progress(cfg, "staging start")
-        proposed_skill = result.new_skill if (cfg.get("evolve_skill") and result.accepted) else None
-        proposed_memory = result.new_memory if (cfg.get("evolve_memory") and result.accepted) else None
+        proposed_skill = (
+            result.new_skill
+            if (
+                cfg.get("evolve_skill")
+                and result.accepted
+                and result.new_skill != skill
+            )
+            else None
+        )
+        proposed_memory = (
+            result.new_memory
+            if (
+                cfg.get("evolve_memory")
+                and result.accepted
+                and result.new_memory != memory
+            )
+            else None
+        )
         skill_proposals, skip_notes = _skill_proposals_from_groups(
             cfg,
             group_outcomes,

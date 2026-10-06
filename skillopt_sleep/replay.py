@@ -68,10 +68,20 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
 
     # rule judges may need the detected tool calls; score locally when possible
     if task.reference_kind == "rule" and task.judge:
-        from skillopt_sleep.judges import score_rule_judge
-        hard, soft, rationale = score_rule_judge(task.judge, response, tools_called)
+        from skillopt_sleep.judges import score_rule_judge_with_feedback
+        hard, soft, rationale, optimizer_feedback = score_rule_judge_with_feedback(
+            task.judge, response, tools_called
+        )
     else:
         hard, soft, rationale = backend.judge(task, response)
+        # Backend judge rationales are audit evidence and may contain provider
+        # or grader implementation details. Keep the optimizer channel generic
+        # for non-rule judges unless a future typed safe-feedback API exists.
+        optimizer_feedback = (
+            "The response did not satisfy the task's evaluation criteria."
+            if hard < 1.0
+            else ""
+        )
 
     ev = getattr(backend, "evidence", None)
     if ev is not None:
@@ -96,6 +106,7 @@ def replay_one(backend: Backend, task: TaskRecord, skill: str, memory: str,
         tools_called=tools_called,
         tokens=int(tokens),
         latency_ms=round(latency_ms, 1),
+        optimizer_feedback=(optimizer_feedback if hard < 1.0 else ""),
     )
 
 

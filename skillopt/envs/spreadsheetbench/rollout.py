@@ -12,6 +12,7 @@ from __future__ import annotations
 import glob as _glob
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -207,6 +208,54 @@ def _auto_verify_output(
     return report
 
 
+# ── Task identifier → confined output directory ──────────────────────────────
+
+# A task id becomes ONE path segment under ``<out_root>/predictions``. Keep the
+# accepted alphabet deliberately narrow: released dataset ids are alphanumeric
+# with ``-``/``_`` (e.g. "1-1", "80-42"), and anything that is not a plausible
+# single segment must not be trusted with a path.
+_SAFE_TASK_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def _is_safe_task_id(task_id: str) -> bool:
+    """True when ``task_id`` is safe to use as one path segment.
+
+    The alphabet excludes path separators and a leading dot, so ``..`` cannot
+    match the pattern at all. The substring check on top is belt-and-braces:
+    it also rejects traversal-shaped values such as ``a..b``, which no released
+    dataset id uses.
+    """
+    tid = str(task_id)
+    return bool(_SAFE_TASK_ID.match(tid)) and ".." not in tid
+
+
+def _confined_task_out_dir(out_root: str, task_id: str) -> str:
+    """Return ``<out_root>/predictions/<task_id>``, confined to that root.
+
+    Raises ``ValueError`` for an identifier that cannot be a single safe path
+    segment, and for a destination that resolves outside ``predictions`` (a
+    pre-existing symlink, say). Callers validate before any filesystem access
+    so a hostile id never reaches the destination write, the agent, or the
+    code-execution path.
+    """
+    tid = str(task_id)
+    if not _is_safe_task_id(tid):
+        raise ValueError(f"unsafe spreadsheet task id: {tid!r}")
+    predictions = os.path.join(os.path.abspath(out_root), "predictions")
+    dest = os.path.join(predictions, tid)
+    try:
+        contained = (
+            os.path.commonpath([os.path.realpath(predictions), os.path.realpath(dest)])
+            == os.path.realpath(predictions)
+        )
+    except ValueError:
+        # Different drives / mixed absolute-relative shapes cannot be compared.
+        contained = False
+    if not contained:
+        raise ValueError(f"spreadsheet destination escapes out_root: {dest!r}")
+    return dest
+
+
 # ── Per-task worker ──────────────────────────────────────────────────────────
 
 
@@ -226,6 +275,12 @@ def process_one(
     Returns a result dict compatible with ``compute_score()``.
     """
     task_id = str(item["id"])
+    # The id becomes a path segment under <out_root>/predictions, so a hostile
+    # value must stop here: before _find_test_cases() touches the data root,
+    # before the destination directory is created, and before the ReAct agent /
+    # code-execution path runs. (Sanitizing only the mkdtemp prefix let such an
+    # id continue on to the destination derived from the raw value.)
+    unsafe_task_id = not _is_safe_task_id(task_id)
     instruction = item["instruction"]
     instruction_type = item.get("instruction_type", "")
     answer_position = item.get("answer_position", "")
@@ -267,6 +322,10 @@ def process_one(
         "error": "",
     }
 
+    if unsafe_task_id:
+        result["fail_reason"] = "unsafe-task-id"
+        return result
+
     try:
         cases = _find_test_cases(task_dir)
         result["n_cases"] = len(cases)
@@ -274,7 +333,13 @@ def process_one(
             result["fail_reason"] = "no-test-cases"
             return result
 
-        task_out_dir = os.path.join(out_root, "predictions", task_id)
+        try:
+            task_out_dir = _confined_task_out_dir(out_root, task_id)
+        except ValueError:
+            # Destination is not confined (symlink / escape): stop before the
+            # directory is created and before any downstream operation runs.
+            result["fail_reason"] = "unsafe-task-id"
+            return result
         os.makedirs(task_out_dir, exist_ok=True)
 
         no1, ip1, _ = cases[0]
@@ -314,6 +379,9 @@ def process_one(
         # ── Stage 1: run ReAct agent on test case 1 ─────────────────────
         result["phase"] = "agent"
 
+        # task_id is already validated as a single safe segment above; using it
+        # verbatim keeps one validation gate instead of sanitizing shapes that
+        # have already been rejected.
         work_dir = tempfile.mkdtemp(prefix=f"react_{task_id}_")
         try:
             # Copy input so agent works in an isolated directory
@@ -606,6 +674,9 @@ def process_one_codegen(
     from skillopt.envs.spreadsheetbench.codegen_agent import run_single, run_multi
 
     task_id = str(item["id"])
+    # Same gate as process_one: validate before the data root is read, before
+    # the persistent destination exists, and before the LLM / code-exec path.
+    unsafe_task_id = not _is_safe_task_id(task_id)
     instruction = item["instruction"]
     instruction_type = item.get("instruction_type", "")
     answer_position = item.get("answer_position", "")
@@ -647,6 +718,10 @@ def process_one_codegen(
         "error": "",
     }
 
+    if unsafe_task_id:
+        result["fail_reason"] = "unsafe-task-id"
+        return result
+
     try:
         cases = _find_test_cases(task_dir)
         result["n_cases"] = len(cases)
@@ -654,7 +729,13 @@ def process_one_codegen(
             result["fail_reason"] = "no-test-cases"
             return result
 
-        task_out_dir = os.path.join(out_root, "predictions", task_id)
+        try:
+            task_out_dir = _confined_task_out_dir(out_root, task_id)
+        except ValueError:
+            # Destination is not confined (symlink / escape): stop before the
+            # directory is created and before any downstream operation runs.
+            result["fail_reason"] = "unsafe-task-id"
+            return result
         os.makedirs(task_out_dir, exist_ok=True)
 
         # ── Save context for Optimizer (Reflect stage) ──────────────────
