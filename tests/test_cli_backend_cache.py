@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from skillopt_sleep.backend import CliBackend, Backend, DualBackend
+from skillopt_sleep.backend import Backend, CliBackend, DualBackend
 from skillopt_sleep.replay import replay_one
 from skillopt_sleep.types import TaskRecord
 

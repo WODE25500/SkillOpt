@@ -16,7 +16,6 @@ from unittest import mock
 
 from skillopt_sleep.backend import AzureOpenAIBackend, AzureResponsesBackend, OpenCodeCliBackend
 
-
 _UNSET = object()
 
 
@@ -152,7 +151,6 @@ def test_opencode_error_path_uses_record_delta(monkeypatch):
     from types import SimpleNamespace
 
     import skillopt_sleep.backend as bm
-    from skillopt_sleep.backend import OpenCodeCliBackend
 
     b = OpenCodeCliBackend(model="", opencode_path="opencode", tool_replay=True)
     monkeypatch.setattr(bm, "_opencode_temporary_workspace", lambda *a, **k: contextlib.nullcontext())
@@ -255,3 +253,46 @@ def test_azure_responses_keeps_known_partial_retry_usage():
     assert out == "ok"
     assert be._tokens == 5, f"known partial retry usage lost: {be._tokens}"
     assert be.token_delta() == 5
+
+
+def test_azure_chat_exhausted_empty_retries_without_usage_uses_length_estimate():
+    """Five empty responses that all omit usage must not read as a free call.
+
+    Reviewed defect: the exhausted-retry exit charged ``usage_total`` (0) and set
+    ``charged_in_call``, so unknown usage became an authoritative zero. Unknown
+    usage belongs to the len//4 estimate (main reported 110 for this shape).
+    """
+    be = _azure_chat([_ChatResp("", usage=None) for _ in range(5)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == ""
+    assert be._tokens == 400 // 4, f"expected length estimate 100, got {be._tokens}"
+    assert be.token_delta() == 100
+
+
+def test_azure_responses_exhausted_empty_retries_without_usage_uses_length_estimate():
+    be = _azure_responses([_ResponsesResp("", usage=None) for _ in range(5)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == ""
+    assert be._tokens == 100, f"expected length estimate 100, got {be._tokens}"
+    assert be.token_delta() == 100
+
+
+def test_azure_chat_exhausted_empty_retries_with_reported_zero_stays_zero():
+    """A reported zero on every exhausted attempt is authoritative, not unknown."""
+    be = _azure_chat([_ChatResp("", 0, 0) for _ in range(5)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == ""
+    assert be._tokens == 0, f"reported zero overridden by estimate: {be._tokens}"
+    assert be.token_delta() == 0
+
+
+def test_azure_responses_exhausted_empty_retries_with_reported_zero_stays_zero():
+    be = _azure_responses([_ResponsesResp("", 0, 0) for _ in range(5)])
+    with mock.patch("time.sleep"):
+        out = be._cached_call("k:1", "x" * 400)
+    assert out == ""
+    assert be._tokens == 0, f"reported zero overridden by estimate: {be._tokens}"
+    assert be.token_delta() == 0

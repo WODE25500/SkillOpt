@@ -1448,7 +1448,7 @@ class OpenCodeCliBackend(CliBackend):
                 ]
         except OpenCodeError as exc:
             # Prompt-only cost on the error path (no response text).
-            delta = self._record_delta(exc.prompt_chars // 4)
+            self._record_delta(exc.prompt_chars // 4)
             self.last_call_error = str(exc)
             return "", []
         self._record_cost(prompt, text)
@@ -2574,10 +2574,17 @@ class AzureOpenAIBackend(CliBackend):
             )
         # Finalize the accumulated provider usage on EVERY exhausted-retry exit,
         # even when the last attempt raised (the paid empty attempts still count).
-        # usage_total of 0 = genuinely no paid usage; the marker still set keeps
-        # _cached_call from substituting its length estimate on top.
-        self._record_delta(usage_total)
-        self._thread_local.charged_in_call = True
+        if usage_reported:
+            # At least one paid attempt reported usage: charge exactly that. The
+            # marker keeps _cached_call from adding its length estimate on top,
+            # and a reported total of 0 stays an authoritative zero.
+            self._record_delta(usage_total)
+            self._thread_local.charged_in_call = True
+        else:
+            # No attempt reported usage: usage is UNKNOWN, not zero. Leave the
+            # marker clear so _cached_call records the len//4 estimate for this
+            # prompt instead of a false free call.
+            self._thread_local.charged_in_call = False
         return ""
 
 
@@ -2683,8 +2690,14 @@ class AzureResponsesBackend(AzureOpenAIBackend):
                 last = e
             if attempt < retries - 1:
                 _t.sleep(min(8.0, (2 ** attempt) * 0.5) + _r.random() * 0.4)
-        self._record_delta(usage_total)
-        self._thread_local.charged_in_call = True
+        # Same rule as AzureOpenAIBackend: charge accumulated provider usage only
+        # when at least one attempt actually reported it; unknown usage falls back
+        # to _cached_call's len//4 estimate rather than reading as a free call.
+        if usage_reported:
+            self._record_delta(usage_total)
+            self._thread_local.charged_in_call = True
+        else:
+            self._thread_local.charged_in_call = False
         return ""
 
 
