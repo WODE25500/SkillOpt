@@ -1,0 +1,35 @@
+{"type":"session","version":4,"id":"v4-compaction-fixture","createdAt":1800000000000,"cwd":"/fixture/project","isSeeded":false,"delegationDepth":0,"agentPreset":"standard"}
+{"type":"permission/preset","seq":0,"time":1800000001000,"data":{"preset":"workspace-write"}}
+{"type":"sandbox/mode","seq":1,"time":1800000002000,"data":{"mode":"workspace-write"}}
+{"type":"approval/policy","seq":2,"time":1800000003000,"data":{"policy":"never"}}
+{"type":"working-directory/change","seq":3,"time":1800000004000,"data":{"cwd":"/fixture/project"}}
+{"type":"agent/inbox/spliced","seq":4,"time":1800000005000,"data":{"target":"next-turn","start":0,"inserted":[{"content":[{"type":"text","text":"Prepare a maintenance summary."}],"source":{"kind":"user"},"role":"user","id":"message-user-1"}]}}
+{"type":"turn/start","seq":5,"time":1800000006000,"data":{"turn":1}}
+{"type":"agent/inbox/spliced","seq":6,"time":1800000007000,"data":{"target":"next-turn","start":0,"removedCount":1,"inserted":[]}}
+{"type":"step/start","seq":7,"time":1800000008000,"data":{"turn":1,"step":1}}
+{"type":"system/message","seq":8,"time":1800000009000,"data":{"message":{"role":"system","content":[{"type":"text","text":"Synthetic system prompt."}],"source":{"kind":"system-prompt"},"id":"message-system-1"}},"surfaceOp":"append"}
+{"type":"user/message","seq":9,"time":1800000010000,"data":{"content":[{"type":"text","text":"Prepare a maintenance summary."}],"source":{"kind":"user"},"role":"user","id":"message-user-1"},"surfaceOp":"append"}
+{"type":"user/message","seq":10,"time":1800000011000,"data":{"content":[{"type":"text","text":"Synthetic runtime context."}],"source":{"kind":"runtime-context","form":"snapshot"},"role":"user","id":"message-context-1"},"surfaceOp":"append"}
+{"type":"request/header","seq":11,"time":1800000012000,"data":{"header":{"config":{"provider":"fixture","model":"fixture-model"},"tools":["shell"]},"reason":"initial"}}
+{"type":"request/context","seq":12,"time":1800000013000,"data":{"provider":"fixture","model":"fixture-model"}}
+{"type":"session/title","seq":13,"time":1800000014000,"data":{"title":"Synthetic maintenance fixture","messageSeqs":[9],"source":{"kind":"fallback"}}}
+{"type":"assistant/message","seq":14,"time":1800000015000,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"text","text":"obsolete private response"},{"type":"tool-call","id":"call-shell-1","name":"shell","arguments":"{\"command\":\"synthetic-secret\"}"}],"source":{"kind":"model","provider":"fixture","model":"fixture-model"},"id":"message-assistant-1"}},"surfaceOp":"append"}
+{"type":"tool/call","seq":15,"time":1800000016000,"data":{"turn":1,"step":1,"callId":"call-shell-1","name":"shell","arguments":"{\"command\":\"synthetic-secret\"}"}}
+{"type":"tool/result","seq":16,"time":1800000017000,"data":{"message":{"role":"tool","source":{"kind":"tool","callId":"call-shell-1"},"toolCallId":"call-shell-1","content":[{"type":"text","text":"class=tool-result-private"}],"isError":false,"id":"message-tool-1"}},"sourceEventSeqs":[15],"surfaceOp":"append"}
+{"type":"job/registered","seq":17,"time":1800000018000,"data":{"jobId":"job-1","kind":"shell","label":"synthetic"}}
+{"type":"job/settled","seq":18,"time":1800000019000,"data":{"jobId":"job-1","kind":"shell","status":"completed"}}
+{"type":"step/end","seq":19,"time":1800000020000,"data":{"turn":1,"step":1}}
+{"type":"command/run","seq":20,"time":1800000021000,"data":{"commandId":"command-1","name":"compact","args":"","source":{"kind":"user"}}}
+{"type":"compaction/start","seq":21,"time":1800000022000,"data":{"compactionId":"compaction-1","sourceCommandId":"command-1","turn":null}}
+{"type":"compaction/summary","seq":22,"time":1800000023000,"data":{"compactionId":"compaction-1","sourceCommandId":"command-1","summary":[{"type":"text","text":"Synthetic compacted summary."}],"rawOutput":[{"type":"text","text":"class=raw-summary-private"}],"llmStreamCall":true,"shadowedRange":{"start":9,"end":14},"shadowedSeqs":[9,10,11,12,13,14],"shadowedTokenCount":42,"provider":"fixture","model":"fixture-model","maxTokens":64}}
+{"type":"user/message","seq":23,"time":1800000024000,"data":{"content":[{"type":"text","text":"synthetic compact checkpoint"},{"type":"text","text":"Synthetic compacted summary."}],"source":{"kind":"compact-checkpoint","compactionId":"compaction-1","sourceCommandId":"command-1"},"role":"user","id":"message-checkpoint-1"},"sourceEventSeqs":[[20,22],[9,14]],"surfaceOp":{"op":"replace","startSeq":9,"endSeq":14}}
+{"type":"compaction/end","seq":24,"time":1800000025000,"data":{"compactionId":"compaction-1","sourceCommandId":"command-1","turn":null}}
+{"type":"command/done","seq":25,"time":1800000026000,"data":{"commandId":"command-1","kind":"success","text":"Synthetic compaction complete.","sourceEventSeq":23}}
+{"type":"step/start","seq":26,"time":1800000027000,"data":{"turn":1,"step":2}}
+{"type":"user/message","seq":27,"time":1800000028000,"data":{"content":[{"type":"text","text":"Continue with the maintenance task."}],"source":{"kind":"user"},"role":"user","id":"message-user-2"},"surfaceOp":"append"}
+{"type":"user/message","seq":28,"time":1800000029000,"data":{"content":[{"type":"text","text":"Synthetic current runtime context."}],"source":{"kind":"runtime-context","form":"snapshot"},"role":"user","id":"message-context-2"},"surfaceOp":"append"}
+{"type":"request/header","seq":29,"time":1800000030000,"data":{"header":{"config":{"provider":"fixture","model":"fixture-model"},"tools":["shell"]},"reason":"series"}}
+{"type":"assistant/message","seq":30,"time":1800000031000,"data":{"turn":1,"step":2,"message":{"role":"assistant","content":[{"type":"text","text":"Maintenance complete."}],"source":{"kind":"model","provider":"fixture","model":"fixture-model"},"id":"message-assistant-2"}},"surfaceOp":"append"}
+{"type":"step/end","seq":31,"time":1800000032000,"data":{"turn":1,"step":2}}
+{"type":"turn/end","seq":32,"time":1800000033000,"data":{"turn":1,"reason":{"kind":"completed"}}}
+{"type":"todo/write","seq":33,"time":1800000034000,"data":{"todos":[{"content":"Synthetic maintenance fixture completed","status":"completed"}]}}

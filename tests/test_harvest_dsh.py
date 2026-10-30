@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,13 @@ from skillopt_sleep.types import SessionDigest
 
 _BASE_TIME = 1_800_000_000_000
 _MASTER_V2_FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "dsh"
+_MASTER_V4_FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "dsh-v4"
+_MASTER_V4_FIXTURE_PATH = (
+    _MASTER_V4_FIXTURE_ROOT
+    / "--fixture-project--"
+    / "v4-compaction-fixture"
+    / "session.v4.jsonl.zstd"
+)
 
 
 def _header(session_id: str, cwd: str | None, *, version=0, **extra):
@@ -415,6 +423,76 @@ def test_master_v2_fixture_is_harvested():
     assert digests[0].raw_path.endswith("session.v2.jsonl.zstd")
 
 
+def test_master_v4_compaction_fixture_is_harvested():
+    pytest.importorskip("zstandard")
+
+    digests = harvest_dsh(str(_MASTER_V4_FIXTURE_ROOT), scope="all")
+
+    assert [digest.session_id for digest in digests] == ["v4-compaction-fixture"]
+    assert digests[0].project == "/fixture/project"
+    assert digests[0].user_prompts == ["Continue with the maintenance task."]
+    assert digests[0].assistant_finals == ["Maintenance complete."]
+    assert digests[0].tools_used == ["shell"]
+    persisted = json.dumps(digests[0].to_dict())
+    assert "obsolete private response" not in persisted
+    assert "class=tool-result-private" not in persisted
+    assert "class=raw-summary-private" not in persisted
+    assert digests[0].raw_path.endswith("session.v4.jsonl.zstd")
+
+
+def test_v4_fixture_source_matches_compressed_artifact():
+    zstd = pytest.importorskip("zstandard")
+
+    compressed = _MASTER_V4_FIXTURE_PATH.read_bytes()
+    source = (_MASTER_V4_FIXTURE_ROOT / "v4-fixture-source.jsonl").read_bytes()
+
+    assert zstd.ZstdDecompressor().decompress(compressed) == source
+
+
+def test_v4_child_replay_and_unknown_sessions_are_excluded(tmp_path: Path):
+    pytest.importorskip("zstandard")
+    project = "/fixture/project"
+    fixture = (
+        tmp_path
+        / _project_key(project)
+        / _encode_segment("v4-compaction-fixture")
+        / "session.v4.jsonl.zstd"
+    )
+    fixture.parent.mkdir(parents=True)
+    shutil.copy2(_MASTER_V4_FIXTURE_PATH, fixture)
+    _write_raw(
+        tmp_path,
+        "v4-subagent",
+        project,
+        [_user(0, "subagent private request"), _assistant(1, "subagent private final")],
+        version=4,
+        origin="subagent",
+        delegationDepth=1,
+    )
+    _write_raw(
+        tmp_path,
+        "v4-replay",
+        project,
+        [_user(0, DSH_REPLAY_SENTINEL + "\nreplay private request"), _assistant(1, "replay final")],
+        version=4,
+    )
+    _write_raw(
+        tmp_path,
+        "v4-unknown",
+        project,
+        [
+            _user(0, "unknown session request"),
+            {"type": "plugin/required", "seq": 1, "time": _BASE_TIME + 2000, "data": {}},
+            _assistant(2, "unknown session final"),
+        ],
+        version=4,
+    )
+
+    digests = harvest_dsh(str(tmp_path), scope="all")
+
+    assert [digest.session_id for digest in digests] == ["v4-compaction-fixture"]
+
+
 def test_v2_packed_rows_are_rejected(tmp_path: Path):
     project = str((tmp_path / "repo").resolve())
     packed = {
@@ -739,6 +817,24 @@ def test_invalid_v2_replacement_discards_complete_session(tmp_path, replacement_
     path = _write_raw(tmp_path, "bad-replace", str(tmp_path), [
         _user(0, "request"), _assistant(1, "old"), replacement, _assistant(3, "new"),
     ], version=2)
+
+    assert digest_dsh_session(str(path), root=str(tmp_path)) is None
+
+
+@pytest.mark.parametrize("surface_op, sources", [
+    ({"op": "replace", "start": 0, "end": 1}, [0, 1]),
+    ({"op": "replace", "startSeq": 1, "endSeq": 0}, [0, 1]),
+    ({"op": "replace", "startSeq": 0, "endSeq": 1}, [[0, 99]]),
+])
+def test_invalid_v4_surface_replacement_discards_complete_session(
+    tmp_path, surface_op, sources,
+):
+    replacement = _user(2, "summary", source="system")
+    replacement["sourceEventSeqs"] = sources
+    replacement["surfaceOp"] = surface_op
+    path = _write_raw(tmp_path, "bad-v4-replace", str(tmp_path), [
+        _user(0, "request"), _assistant(1, "old"), replacement, _assistant(3, "new"),
+    ], version=4)
 
     assert digest_dsh_session(str(path), root=str(tmp_path)) is None
 
