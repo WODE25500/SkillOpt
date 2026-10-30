@@ -35,44 +35,91 @@ from skillopt_sleep.types import SessionDigest
 
 _LOGGER = logging.getLogger("skillopt_sleep.harvest_dsh")
 _LOG_NAME_RE = re.compile(r"^session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?$")
-# DSH's current writer is v2.  v0/v1 are retained historical generations and
-# use the same validated logical event boundary here.  A future generation is
+# DSH's current writer is v4. v0/v1 are retained historical generations and
+# use the same validated logical event boundary here. A future generation is
 # selected first and then discarded if it is outside this set.
-_SUPPORTED_FORMAT_VERSIONS = frozenset({0, 1, 2})
-_V2_HEADER_REQUIRED_KEYS = frozenset(
+_SUPPORTED_FORMAT_VERSIONS = frozenset({0, 1, 2, 4})
+_MODERN_HEADER_REQUIRED_KEYS = frozenset(
     {"type", "version", "id", "createdAt", "isSeeded", "delegationDepth"}
 )
-_V2_HEADER_ALLOWED_KEYS = _V2_HEADER_REQUIRED_KEYS | frozenset(
+_MODERN_HEADER_ALLOWED_KEYS = _MODERN_HEADER_REQUIRED_KEYS | frozenset(
     {"cwd", "parentSession", "origin", "agentPreset"}
 )
 _PACKED_TYPES = {"text-chunks", "reasoning-chunks", "tool-call-chunks"}
-_SURFACE_EVENT_TYPES = {"user/message", "assistant/message", "tool/result"}
+_SURFACE_EVENT_TYPES = {
+    "assistant/message",
+    "developer/message",
+    "image/offload",
+    "system/message",
+    "tool/result",
+    "user/message",
+}
 _KNOWN_EVENT_TYPES = {
-    # Current DSH lifecycle and presentation metadata. These records advance
-    # the durable sequence but never contribute transcript content.
-    "permission/preset",
-    "sandbox/mode",
-    "approval/policy",
+    # Generated from DSH v4's KNOWN_SESSION_EVENT_TYPES at
+    # f3803c96974ad4a94195fb97e5c637e9c2a3afe3. Records outside this set are
+    # refused unless the producer marks them ignorable.
+    "agent-preset/selected",
+    "agent/inbox/spliced",
     "approval/asked",
     "approval/decided",
-    "agent/inbox/spliced",
-    "turn/start",
-    "turn/end",
-    "step/start",
-    "step/end",
+    "approval/policy",
+    "assistant/attempt",
+    "assistant/message",
+    "command/done",
+    "command/run",
+    "compaction/end",
+    "compaction/prune",
+    "compaction/start",
+    "compaction/summary",
+    "deliverables/presented",
+    "developer/message",
+    "feedback/message-delete",
+    "feedback/message-put",
+    "feedback/record",
+    "goal/change",
+    "hook/invoked",
+    "hook/result",
+    "image/offload",
+    "job/registered",
+    "job/settled",
+    "llm/retry",
+    "llm/retry-started",
+    "model/selection",
+    "permission/preset",
+    "plan/mode",
+    "request/context",
+    "request/header",
+    "sandbox/mode",
+    "schedule/change",
+    "session-log-deepseek/delivery-accepted",
+    "session/end-seed",
     "session/title",
     "session/title-llm-request",
-    "user/message",
-    "assistant/chunk",
-    "assistant/message",
-    "assistant/attempt",
+    "step/end",
+    "step/start",
+    "subagent/catalog",
+    "subagent/descriptor",
+    "subagent/model-selection-policy",
+    "system/message",
+    "team/member",
+    "team/message/delivered",
+    "team/message/queued",
+    "team/task",
+    "todo/write",
+    "tool-workflow/agent-end",
+    "tool-workflow/agent-start",
+    "tool-workflow/run-end",
+    "tool-workflow/run-start",
     "tool/call",
+    "tool/ptc-dispatch",
+    "tool/ptc-dispatch-start",
     "tool/result",
-    "request/header",
-    "request/context",
-    "session/end-seed",
-    "feedback/record",
+    "turn/end",
+    "turn/start",
+    "user/message",
     "web/deepseek-search-llm-request",
+    "working-directory/change",
+    "workspace/changes",
 }
 _TOOL_NAME_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -310,9 +357,10 @@ def _header_from_record(record: dict[str, Any], path: str, root: str) -> dict[st
     if type(version) is not int or version != filename_version or version not in _SUPPORTED_FORMAT_VERSIONS:
         raise _DshFormatError("unsupported format")
     if version >= 2 and (
-        not _V2_HEADER_REQUIRED_KEYS.issubset(record) or not set(record).issubset(_V2_HEADER_ALLOWED_KEYS)
+        not _MODERN_HEADER_REQUIRED_KEYS.issubset(record)
+        or not set(record).issubset(_MODERN_HEADER_ALLOWED_KEYS)
     ):
-        raise _DshFormatError("invalid v2 header keys")
+        raise _DshFormatError("invalid modern header keys")
     session_id = record.get("id")
     created = record.get("createdAt")
     depth = record.get("delegationDepth")
@@ -322,7 +370,7 @@ def _header_from_record(record: dict[str, Any], path: str, root: str) -> dict[st
     if cwd is not None and (not isinstance(cwd, str) or not cwd):
         raise _DshFormatError("invalid cwd")
     if version >= 2 and cwd is not None and not _is_absolute_dsh_path(cwd):
-        raise _DshFormatError("invalid v2 cwd")
+        raise _DshFormatError("invalid modern cwd")
     parent = record.get("parentSession")
     if parent is not None and (not isinstance(parent, str) or not parent):
         raise _DshFormatError("invalid parent session")
@@ -438,14 +486,13 @@ def _feedback_signals(record: dict[str, Any]) -> list[str]:
 
 
 def _decode_source_event_seqs(value: Any, *, max_entries: int) -> list[int]:
-    """Expand DSH v2's compact ``number | [start, end]`` sequence ranges."""
+    """Expand modern DSH's compact ``number | [start, end]`` sequence ranges."""
     if not isinstance(value, list):
         raise _DshFormatError("invalid surface sources")
     decoded: list[int] = []
-    has_range = False
     for item in value:
         if _is_safe_int(item):
-            if len(decoded) >= max_entries:
+            if item >= max_entries or len(decoded) >= max_entries:
                 raise _DshFormatError("too many surface sources")
             decoded.append(item)
             continue
@@ -458,13 +505,12 @@ def _decode_source_event_seqs(value: Any, *, max_entries: int) -> list[int]:
         ):
             raise _DshFormatError("invalid surface sources")
         start, end = item
+        if end >= max_entries:
+            raise _DshFormatError("surface source exceeds event sequence")
         count = end - start + 1
         if count > max_entries - len(decoded):
             raise _DshFormatError("too many surface sources")
         decoded.extend(range(start, end + 1))
-        has_range = True
-    if has_range and any(later <= earlier for earlier, later in zip(decoded, decoded[1:])):
-        raise _DshFormatError("non-increasing surface sources")
     if len(set(decoded)) != len(decoded):
         raise _DshFormatError("duplicate surface sources")
     return decoded
@@ -475,14 +521,14 @@ def _surface_replacement(record: dict[str, Any], version: int) -> Optional[_Repl
     operation = record.get("surfaceOp")
     if operation is None:
         if version >= 2:
-            raise _DshFormatError("missing v2 surface operation")
+            raise _DshFormatError("missing modern surface operation")
         operation = "append"
 
-    # Preserve the currently supported v2 assistant contract explicitly.
+    # Preserve the currently supported modern assistant contract explicitly.
     # Broadening this to replacement requires an upstream format sample.
     if version >= 2 and record["type"] == "assistant/message":
         if operation != "append" or record.get("sourceEventSeqs") is not None:
-            raise _DshFormatError("v2 assistant surface must append without sources")
+            raise _DshFormatError("modern assistant surface must append without sources")
 
     source_seqs = record.get("sourceEventSeqs")
     if source_seqs is not None:
@@ -501,11 +547,14 @@ def _surface_replacement(record: dict[str, Any], version: int) -> Optional[_Repl
         return None
     if not isinstance(operation, dict) or operation.get("op") != "replace":
         raise _DshFormatError("invalid surface operation")
-    start, end = operation.get("start"), operation.get("end")
+    if version >= 4:
+        start, end = operation.get("startSeq"), operation.get("endSeq")
+    else:
+        start, end = operation.get("start"), operation.get("end")
     if not _is_safe_int(start) or not _is_safe_int(end):
         raise _DshFormatError("invalid surface replacement range")
     if version >= 2 and not source_seqs:
-        raise _DshFormatError("missing v2 surface sources")
+        raise _DshFormatError("missing modern surface sources")
     return _Replacement(start, end, frozenset(source_seqs) if version >= 2 else None)
 
 
@@ -516,7 +565,7 @@ def _decode_event(record: dict[str, Any], expected_seq: int, version: int) -> _D
         raise _DshFormatError("invalid event type")
     if kind in _PACKED_TYPES:
         if version >= 2:
-            raise _DshFormatError("packed row in v2 session")
+            raise _DshFormatError("packed row in modern session")
         count = _packed_count(record)
         if record["seq0"] != expected_seq:
             raise _DshFormatError("packed sequence gap")
@@ -573,7 +622,7 @@ def _apply_surface(
         raise _DshFormatError("invalid surface replacement range")
     if replacement.sources is not None:
         if any(surface[index].seq not in replacement.sources for index in range(start, end + 1)):
-            raise _DshFormatError("incomplete v2 surface sources")
+            raise _DshFormatError("incomplete modern surface sources")
     surface[start : end + 1] = [entry]
 
 
@@ -624,7 +673,7 @@ def digest_dsh_session(
             has_inherited_seed_marker = has_inherited_seed_marker or event.inherited_seed_marker
 
         if header["version"] >= 2 and bool(header["isSeeded"]) != has_inherited_seed_marker:
-            raise _DshFormatError("v2 seeded header and inherited seed marker disagree")
+            raise _DshFormatError("modern seeded header and inherited seed marker disagree")
 
         for entry in surface:
             if entry.kind == "user/message":
